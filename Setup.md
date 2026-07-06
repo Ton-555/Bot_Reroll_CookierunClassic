@@ -24,20 +24,18 @@ py -3 --version
 เปิด PowerShell ในโฟลเดอร์ที่ต้องการเก็บโปรเจกต์ แล้วรัน:
 
 ```powershell
-git clone <repo-url>
-cd Bot_reroll_cookierunV4
+git clone https://github.com/Ton-555/Bot_Reroll_CookierunClassic.git
+cd Bot_Reroll_CookierunClassic
 ```
 
 คำอธิบาย:
 
-- `git clone <repo-url>` คือการดาวน์โหลดโปรเจกต์จาก Git repository ลงมาไว้ในเครื่อง
-- `cd Bot_reroll_cookierunV4` คือการเข้าไปในโฟลเดอร์โปรเจกต์ที่เพิ่ง clone มา
+- `git clone https://github.com/Ton-555/Bot_Reroll_CookierunClassic.git` คือการดาวน์โหลดโปรเจกต์จาก Git repository ลงมาไว้ในเครื่อง
+- `cd Bot_Reroll_CookierunClassic` คือการเข้าไปในโฟลเดอร์โปรเจกต์ที่เพิ่ง clone มา
 
-ให้เปลี่ยน `<repo-url>` เป็น URL จริงของ repository เช่น:
+หน้า GitHub ของโปรเจกต์:
 
-```powershell
-git clone https://github.com/username/Bot_reroll_cookierunV4.git
-```
+[Ton-555/Bot_Reroll_CookierunClassic](https://github.com/Ton-555/Bot_Reroll_CookierunClassic)
 
 ## 3. ติดตั้ง Python dependency
 
@@ -194,8 +192,8 @@ adb devices
 ใช้ลำดับนี้เมื่อ setup เครื่องใหม่:
 
 ```powershell
-git clone <repo-url>
-cd Bot_reroll_cookierunV4
+git clone https://github.com/Ton-555/Bot_Reroll_CookierunClassic.git
+cd Bot_Reroll_CookierunClassic
 .\install_dependencies.bat
 adb version
 adb devices
@@ -256,4 +254,3 @@ adb devices
 - ใช้ Device ID จาก `adb devices`
 - เปิดเกมให้อยู่สถานะเริ่มต้นที่ถูกต้อง
 - ใช้ปุ่ม `Find Position` หรือ `CoordPicker.py` เพื่อหาและแก้พิกัดใหม่
-
