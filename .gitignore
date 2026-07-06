@@ -1,0 +1,38 @@
+# Python cache/build output
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local editor/tool state
+.vscode/
+.idea/
+.codex/
+.agents/
+
+# Local config/secrets
+.env
+.env.*
+*.local
+
+# Runtime/debug output
+logs/
+*.log
+debug/
+screenshots/
+captures/
+*.tmp
+*.bak
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
