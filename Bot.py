@@ -11,68 +11,71 @@ Step formats (action_type, *args, delay_seconds, "description"):
 import subprocess
 import time
 import sys
+import random
 
 DEVICE_ID = "127.0.0.1:16384"
+TAP_POSITION_JITTER = 2
+DELAY_EXTRA_SECONDS_MIN = 0.0
+DELAY_EXTRA_SECONDS_MAX = 2.0
 
 STEPS = [
     ("tap", 1127, 33, 3.0,    "Press Setting"),  # index 00
     ("tap", 1010, 150, 3.0,   "Press Game Info"),  # index 01
-    ("tap", 1013, 616, 70.0,  "Press Delete Account & Wait"),  # index 02
+    ("tap", 1013, 616, 65.0,  "Press Delete Account & Wait"),  # index 02
     ("tap", 796, 494, 5.0,    "Press Confirm Delete"),  # index 03
     ("tap", 626, 460, 15.0,    "Press Confirm"),  # index 04
     ("tap", 665, 639, 7.5,    "Press DevPlay Login"),  # index 05
-    ("tap", 841, 485, 30.0,    "Press Play ID"),  # index 06
-    ("tap", 635, 460, 14.0,    "Press Confirm HI"),  # index 07
-    ("tap", 1197, 38, 6.5,    "Press Stop game"),  # index 08
-    ("tap", 608, 428, 6.0,    "Press Quit"),  # index 09
-    ("tap", 624, 360, 6.5,    "Press Quit tutorial"),  # index 10
-    ("tap", 631, 376, 5.0,    "Press Enter name"),  # index 11
-    ("text", "MyCharacterName", 3.5, "Input name"),  # index 12
+    ("tap", 841, 485, 20.0,    "Press Play ID"),  # index 06
+    ("tap", 635, 460, 18.0,    "Press Confirm HI"),  # index 07
+    ("tap", 1197, 38, 5.,    "Press Stop game"),  # index 08
+    ("tap", 608, 428, 5.0,    "Press Quit"),  # index 09
+    ("tap", 624, 360, 10.0,    "Press Quit tutorial"),  # index 10
+    ("tap", 631, 376, 4.0,    "Press Enter name"),  # index 11
+    ("text", "MyCharacterName", 4.0, "Input name"),  # index 12
     ("keyevent", "KEYCODE_ENTER", 6.5, "Press Enter"),  # index 13
-    ("tap", 629, 492, 8.0,    "Press Confirm name"),  # index 14
+    ("tap", 629, 492, 10.0,    "Press Confirm name"),  # index 14
     ("tap", 1125, 56, 5.0,    "Press Skip ads news 1"),  # index 15
     ("tap", 1125, 56, 5.0,    "Press Skip ads news 2"),  # index 16
-    ("tap", 1126, 72, 5.0,    "Press Skip ads news 3"),  # index 17
+    ("tap", 1126, 72, 10.0,    "Press Skip ads news 3"),  # index 17
     ("tap", 639, 568, 5.0,    "Press get gem"),  # index 18
     ("tap", 639, 568, 5.0,    "Press get coin"),  # index 19
     ("tap", 639, 568, 5.0,    "Press get gift point"),  # index 20
-    ("tap", 643, 659, 8.0,    "Press Confirm Daily Check-in"),  # index 21
+    ("tap", 643, 659, 10.0,    "Press Confirm Daily Check-in"),  # index 21
     ("tap", 642, 574, 5.0,    "Press Confirm gift ticket"),  # index 22
     ("tap", 642, 574, 5.0,    "Press Confirm gift EXPx2"),  # index 23
     ("tap", 642, 574, 5.0,    "Press Confirm gift Coin 200K"),  # index 24
     ("tap", 642, 574, 5.0,    "Press Confirm gift Golden Dough"),  # index 25
     ("tap", 642, 574, 5.0,    "Press Confirm gift 5 tickets"),  # index 26
-    ("tap", 642, 574, 7.0,    "Press Confirm gift 30 keys "),  # index 27
-    ("tap", 695, 678, 3.0,    "Press Mail Boxs"),  # index 28
-    ("tap", 826, 149, 5.0,    "Press Reward in mail boxs"),  # index 29
-    ("tap", 652, 622, 10.0,   "Press Claim all"),  # index 30
+    ("tap", 642, 574, 10.0,    "Press Confirm gift 30 keys "),  # index 27
+    ("tap", 695, 678, 4.0,    "Press Mail Boxs"),  # index 28
+    ("tap", 826, 149, 4.0,    "Press Reward in mail boxs"),  # index 29
+    ("tap", 652, 622, 8.0,   "Press Claim all"),  # index 30
     ("tap", 641, 571, 4.0,    "Press Confirm all rewards"),  # index 31
-    ("tap", 1128, 89, 3.0,    "Press Exit mail boxs"),  # index 32
-
-    ("tap", 1088, 533, 3.0,    "Press Treasure Button"),  # index 33
-    ("tap", 288, 645, 3.0,    "Press Draw"),  # index 34
+    ("tap", 1128, 89, 8.0,    "Press Exit mail boxs"),  # index 32
+    ("tap", 1088, 533, 4.0,    "Press Treasure Button"),  # index 33
+    ("tap", 288, 645, 4.0,    "Press Draw"),  # index 34
     #loop
     #have matching img gear
-    ("tap", 749, 522, 10.0,    "Press Open Supreme boxs 1"),  # index 35
+    ("tap", 749, 522, 8.0,    "Press Open Supreme boxs 1"),  # index 35
     ("tap", 644, 567, 3.0,    "Press Confirm get Treasure 1"),  # index 36
-    ("tap", 749, 522, 10.0,    "Press Open Supreme boxs 2"),  # index 37
+    ("tap", 749, 522, 8.0,    "Press Open Supreme boxs 2"),  # index 37
     ("tap", 644, 567, 3.0,    "Press Confirm get Treasure 2"),  # index 38
-    ("tap", 749, 522, 10.0,    "Press Open Supreme boxs 3"),  # index 39
+    ("tap", 749, 522, 8.0,    "Press Open Supreme boxs 3"),  # index 39
     ("tap", 644, 567, 3.0,    "Press Confirm get Treasure 3"),  # index 40
-    ("tap", 749, 522, 10.0,    "Press Open Supreme boxs 4"),  # index 41
+    ("tap", 749, 522, 8.0,    "Press Open Supreme boxs 4"),  # index 41
     ("tap", 644, 567, 3.0,    "Press Confirm get Treasure 4"),  # index 42
-    ("tap", 749, 522, 10.0,    "Press Open Supreme boxs 5"),  # index 43
+    ("tap", 749, 522, 8.0,    "Press Open Supreme boxs 5"),  # index 43
     ("tap", 644, 567, 3.0,    "Press Confirm get Treasure 5"),  # index 44
-    ("tap", 749, 522, 10.0,    "Press Open Supreme boxs 6"),  # index 45
+    ("tap", 749, 522, 8.0,    "Press Open Supreme boxs 6"),  # index 45
     ("tap", 644, 567, 3.0,    "Press Confirm get Treasure 6"),  # index 46
-    ("tap", 749, 522, 10.0,    "Press Open Supreme boxs 7"),  # index 47
+    ("tap", 749, 522, 8.0,    "Press Open Supreme boxs 7"),  # index 47
     ("tap", 644, 567, 3.0,    "Press Confirm get Treasure 7"),  # index 48
-    ("tap", 749, 522, 10.0,    "Press Open Supreme boxs 8"),  # index 49
+    ("tap", 749, 522, 8.0,    "Press Open Supreme boxs 8"),  # index 49
     ("tap", 644, 567, 3.0,    "Press Confirm get Treasure 8"),  # index 50
     ("tap", 1128, 89, 3.0,    "Press Exit Treasure"),  # index 51
     ("tap", 1128, 89, 3.0,    "Press Exit con firm Treasure2"),  # index 52
     #open treasure add 6+1 If have pao or moungud
-    ("tap", 1006, 552, 15.0,    "Press Open Treasure 6+1"),  # index 53
+    ("tap", 1006, 552, 10.0,    "Press Open Treasure 6+1"),  # index 53
     ("tap", 640, 573, 3.0,    "Press  Confirm Treasure 1"),  # index 54
     ("tap", 640, 573, 3.0,    "Press  Confirm Treasure 2"),  # index 55
     ("tap", 640, 573, 3.0,    "Press  Confirm Treasure 3"),  # index 56
@@ -80,7 +83,7 @@ STEPS = [
     ("tap", 640, 573, 3.0,    "Press  Confirm Treasure 5"),  # index 58
     ("tap", 640, 573, 3.0,    "Press  Confirm Treasure 6"),  # index 59
     ("tap", 640, 573, 3.0,    "Press  Confirm Treasure 7"),  # index 60
-    ("tap", 1038, 122, 15.0,    "Press Exit Treasure 6+1"),  # index 61
+    ("tap", 1038, 122, 6.0,    "Press Exit Treasure 6+1"),  # index 61
     ("tap", 1128, 89, 3.0,    "Press Exit Treasure"),  # index 62
     ("tap", 1128, 89, 3.0,    "Press Exit con firm Treasure2"),  # index 63
     
@@ -88,59 +91,58 @@ STEPS = [
     #if have two open pets and 6+1
     ("tap", 810, 551, 4.0,    "Press Pet Button"),  # index 64
     ("tap", 171, 637, 4.0,    "Press Hatch Pet"),  # index 65
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 1"),  # index 66
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 1"),  # index 66
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem "),  # index 67
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 2"),  # index 68
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 2"),  # index 68
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 2"),  # index 69
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 3"),  # index 70
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 3"),  # index 70
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 3"),  # index 71
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 4"),  # index 72
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 4"),  # index 72
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 4"),  # index 73
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 5"),  # index 74
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 5"),  # index 74
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 5"),  # index 75
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 6"),  # index 76
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 6"),  # index 76
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 6"),  # index 77
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 7"),  # index 78
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 7"),  # index 78
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 7"),  # index 79
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 8"),  # index 80
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 8"),  # index 80
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 8"),  # index 81
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 9"),  # index 82
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 9"),  # index 82
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 9"),  # index 83
     ("tap", 1124, 114, 3.0,    "Press Exit Hatch"),  # index 84
-    ("tap", 1219, 123, 3.0,    "Press Exit Hatch to Main menu"),  # index 85
-
+    ("tap", 1219, 123, 3.0,    "Press Exit Hatch to Main menu"),  # index 88
     #Open pet 15 time
     ("tap", 810, 551, 4.0,    "Press Pet Button"),  # index 86
     ("tap", 171, 637, 4.0,    "Press Hatch Pet"),  # index 87
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 1"),  # index 88
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 1"),  # index 88
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem "),  # index 89
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 2"),  # index 90
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 2"),  # index 90
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 2"),  # index 91
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 3"),  # index 92
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 3"),  # index 92
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 3"),  # index 93
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 4"),  # index 94
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 4"),  # index 94
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 4"),  # index 95
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 5"),  # index 96
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 5"),  # index 96
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 5"),  # index 97
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 6"),  # index 98
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 6"),  # index 98
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 6"),  # index 99
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 7"),  # index 100
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 7"),  # index 100
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 7"),  # index 101
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 8"),  # index 102
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 8"),  # index 102
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 8"),  # index 103 
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 9"),  # index 104
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 9"),  # index 104
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 9"),  # index 105 
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 10"),  # index 106
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 10"),  # index 106
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 10"),  # index 107 
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 11"),  # index 108
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 11"),  # index 108
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 11"),  # index 109
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 12"),  # index 110
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 12"),  # index 110
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 12"),  # index 111 
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 13"),  # index 112
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 13"),  # index 112
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 13"),  # index 113
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 14"),  # index 114
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 14"),  # index 114
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 14"),  # index 115 
-    ("tap", 964, 586, 12.0,    "Press Hatch 20 Gem 15"),  # index 116
+    ("tap", 964, 586, 8.0,    "Press Hatch 20 Gem 15"),  # index 116
     ("tap", 1016, 107, 3.0,    "Press Exit Hatch 20 gem 15"),  # index 117
     ("tap", 1124, 114, 3.0,    "Press Exit Hatch"),  # index 118
     ("tap", 1219, 123, 3.0,    "Press Exit Hatch to Main menu"),  # index 119 
@@ -287,6 +289,21 @@ def get_step_label(step, index=None):
     return f"{prefix}[{action}] {note}"
 
 
+def jitter_tap_coordinates(x, y):
+    if TAP_POSITION_JITTER <= 0:
+        return x, y
+    jittered_x = x + random.randint(-TAP_POSITION_JITTER, TAP_POSITION_JITTER)
+    jittered_y = y + random.randint(-TAP_POSITION_JITTER, TAP_POSITION_JITTER)
+    return max(0, jittered_x), max(0, jittered_y)
+
+
+def get_runtime_step_delay(step):
+    base_delay = float(step[-2])
+    if DELAY_EXTRA_SECONDS_MAX <= DELAY_EXTRA_SECONDS_MIN:
+        return base_delay
+    return base_delay + random.uniform(DELAY_EXTRA_SECONDS_MIN, DELAY_EXTRA_SECONDS_MAX)
+
+
 def tap(device_id, x, y):
     subprocess.run(
         ["adb", "-s", device_id, "shell", "input", "tap", str(x), str(y)],
@@ -312,6 +329,7 @@ def execute_step(device_id, step):
     action = step[0]
     if action == "tap":
         _, x, y, _, _ = step
+        x, y = jitter_tap_coordinates(x, y)
         tap(device_id, x, y)
         return f"({x}, {y})"
     elif action == "text":
@@ -332,7 +350,7 @@ def run_once(device_id):
 
     for i, step in enumerate(STEPS, 1):
         action = step[0]
-        delay = step[-2]  # delay is 2nd to last
+        delay = get_runtime_step_delay(step)
         note = step[-1]   # note is last
 
         detail = execute_step(device_id, step)
