@@ -2,12 +2,15 @@
 GUI Main Interface for MuMu Player Reroll Bot
 """
 
+import json
 import subprocess
 import threading
 import time
 import tkinter as tk
+import urllib.error
+import urllib.request
 from pathlib import Path
-from tkinter import ttk, scrolledtext
+import customtkinter as ctk
 import cv2
 import numpy as np
 
@@ -28,7 +31,24 @@ from Bot import (
 DEFAULT_DEVICE_ID = "127.0.0.1:16384"
 MAX_DEVICE_SLOTS = 6
 REFRESH_INTERVAL = 0.7
+APP_BG = "#101114"
+SURFACE_BG = "#181a1f"
+SURFACE_ALT_BG = "#121318"
+LOG_BG = "#0c0d10"
+BORDER_COLOR = "#2b2f36"
+TEXT_COLOR = "#e5e7eb"
+TEXT_MUTED_COLOR = "#8b949e"
+ACCENT_COLOR = "#1f6f68"
+ACCENT_HOVER_COLOR = "#287f77"
+TAB_SELECTED_TEXT_COLOR = "#5eead4"
+DANGER_COLOR = "#7f2d2d"
+DANGER_HOVER_COLOR = "#923838"
+SUCCESS_COLOR = "#3f8f5f"
+WARN_COLOR = "#b38a22"
 IMAGE_SELECT_DIR = Path(__file__).resolve().parent / "Image_Select"
+DISCORD_WEBHOOK_CONFIG_PATH = Path(__file__).resolve().parent / "discord_webhook.local"
+STEP_CONFIG_PATH = Path(__file__).resolve().parent / "step_config.local"
+DISCORD_WEBHOOK_TIMEOUT = 4
 IMAGE_MATCH_THRESHOLD = 0.84
 SCORE_MATCH_THRESHOLD = 0.84
 MATCH_SCALES = (0.90, 0.95, 1.0, 1.05, 1.10)
@@ -313,6 +333,65 @@ def execute_bot_step(device_id, step):
     return "?"
 
 
+def is_valid_discord_webhook_url(url):
+    return url.startswith((
+        "https://discord.com/api/webhooks/",
+        "https://discordapp.com/api/webhooks/",
+    ))
+
+
+def read_discord_webhook_url():
+    try:
+        return DISCORD_WEBHOOK_CONFIG_PATH.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        return ""
+
+
+def write_discord_webhook_url(url):
+    url = url.strip()
+    if url:
+        DISCORD_WEBHOOK_CONFIG_PATH.write_text(url + "\n", encoding="utf-8")
+    elif DISCORD_WEBHOOK_CONFIG_PATH.exists():
+        DISCORD_WEBHOOK_CONFIG_PATH.unlink()
+
+
+def read_step_config_overrides():
+    try:
+        raw_config = json.loads(STEP_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw_config, dict):
+        return {}
+    return raw_config
+
+
+def write_step_config_overrides(step_config):
+    if step_config:
+        STEP_CONFIG_PATH.write_text(
+            json.dumps(step_config, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    elif STEP_CONFIG_PATH.exists():
+        STEP_CONFIG_PATH.unlink()
+
+
+def post_discord_webhook(url, content):
+    payload = json.dumps({"content": content}, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "MuMu-Reroll-Bot",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=DISCORD_WEBHOOK_TIMEOUT) as response:
+        return response.status
+
+
 class BotRunner:
     def __init__(self, app, device_id, slot_index, steps, run_label, loop_enabled):
         self.app = app
@@ -375,6 +454,15 @@ class BotRunner:
                         self.log(
                             f"Image matched: {match['name']} score={match['score']:.3f}. Stopping next steps.\n",
                             "success",
+                        )
+                        self.app.notify_discord_result(
+                            "Image match found",
+                            (
+                                f"D{self.slot_index + 1} {self.device_id}\n"
+                                f"Flow: {self.run_label}\n"
+                                f"Target: {match['name']} score={match['score']:.3f}\n"
+                                f"Cycle: {cycle}"
+                            ),
                         )
                         self.stop_reason = "image_match"
                         self.running = False
@@ -510,6 +598,15 @@ class ScoreFlowRunner:
                     f"Loop #{self.cycle_count}  | Score {self.score}/{self.target_score}"
                     f"{self._format_found_targets()}\n",
                     "success",
+                )
+                self.app.notify_discord_result(
+                    "Score flow complete",
+                    (
+                        f"D{self.slot_index + 1} {self.device_id}\n"
+                        f"Score: {self.score}/{self.target_score}\n"
+                        f"Loop: {self.cycle_count}"
+                        f"{self._format_found_targets()}"
+                    ),
                 )
             elif self.stop_reason == "manual_stop":
                 self.log("Score flow stopped by user.\n", "warn")
@@ -680,6 +777,14 @@ class PetImageTestRunner:
                         "Stopping pet image test and keeping current account.\n",
                         "success",
                     )
+                    self.app.notify_discord_result(
+                        "Pet image match found",
+                        (
+                            f"D{self.slot_index + 1} {self.device_id}\n"
+                            f"Target: {match['name']} score={match['score']:.3f}\n"
+                            f"Loop: {self.cycle_count}"
+                        ),
+                    )
                     self.stop_reason = "image_match"
                     self.running = False
                     break
@@ -786,8 +891,10 @@ class App:
     def __init__(self, root):
         self.root = root
         self.root.title("MuMu Bot - Reroll Tool")
-        self.root.geometry("1100x720")
+        self.root.geometry("1180x760")
+        self.root.minsize(1040, 680)
         self.root.resizable(True, True)
+        self.root.configure(fg_color=APP_BG)
 
         self.device_id_vars = []
         self.device_status_vars = []
@@ -804,7 +911,40 @@ class App:
         self.main_log_entries = []
         self.main_log_filter_var = tk.StringVar(value=MAIN_LOG_FILTER_ALL)
         self.main_log_filter_combo = None
+        self.tab_view = None
         self.log_widget = None
+        discord_webhook_url = read_discord_webhook_url()
+        self.discord_webhook_url = discord_webhook_url
+        self.discord_webhook_var = tk.StringVar(value=discord_webhook_url)
+        self.discord_webhook_status_var = tk.StringVar(
+            value="Configured" if discord_webhook_url else "Not configured"
+        )
+        self.config_step_label_to_index = {}
+        self.config_step_var = tk.StringVar()
+        self.config_step_action_var = tk.StringVar(value="-")
+        self.config_step_note_var = tk.StringVar(value="-")
+        self.config_step_x_var = tk.StringVar()
+        self.config_step_y_var = tk.StringVar()
+        self.config_step_time_var = tk.StringVar()
+        self.config_step_text_var = tk.StringVar()
+        self.config_step_value_var = tk.StringVar()
+        self.config_step_status_var = tk.StringVar(value="Select a step to edit")
+        self.config_step_x_entry = None
+        self.config_step_y_entry = None
+        self.config_step_value_label = None
+        self.config_step_value_entry = None
+        self.config_step_coord_frame = None
+        self.config_step_save_btn = None
+        self.config_step_reload_btn = None
+        self.config_step_status_label = None
+        self.config_step_combo = None
+        self.config_step_picker = None
+        self.config_step_picker_parent = None
+        self.debug_group_picker = None
+        self.debug_group_picker_parent = None
+        self.debug_step_picker = None
+        self.debug_step_picker_parent = None
+        self.step_config_overrides = read_step_config_overrides()
 
         for slot in range(MAX_DEVICE_SLOTS):
             default_value = DEFAULT_DEVICE_ID if slot == 0 else ""
@@ -816,19 +956,38 @@ class App:
             self.device_status_vars.append(status_var)
             self.device_score_target_vars.append(score_target_var)
 
+        loaded_step_overrides = self._load_step_config_overrides()
         self._build_ui()
+        if loaded_step_overrides:
+            self._log(f"Loaded {loaded_step_overrides} step config override(s).\n", "info")
 
     def _build_ui(self):
-        notebook = ttk.Notebook(self.root)
-        notebook.pack(fill=tk.BOTH, expand=True)
+        tab_view = ctk.CTkTabview(
+            self.root,
+            fg_color=APP_BG,
+            segmented_button_fg_color=SURFACE_BG,
+            segmented_button_selected_color=SURFACE_BG,
+            segmented_button_selected_hover_color=SURFACE_ALT_BG,
+            segmented_button_unselected_color=SURFACE_BG,
+            segmented_button_unselected_hover_color=SURFACE_ALT_BG,
+            text_color=TEXT_MUTED_COLOR,
+            command=self._on_tab_changed,
+            anchor="w",
+        )
+        self.tab_view = tab_view
+        tab_view.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+        tab_view.add("Main")
+        tab_view.add("Config")
+        tab_view.add("Debug")
 
-        main_tab = ttk.Frame(notebook)
-        debug_tab = ttk.Frame(notebook)
-        notebook.add(main_tab, text="Main")
-        notebook.add(debug_tab, text="Debug")
+        main_tab = tab_view.tab("Main")
+        config_tab = tab_view.tab("Config")
+        debug_tab = tab_view.tab("Debug")
 
         self._build_main_tab(main_tab)
+        self._build_config_tab(config_tab)
         self._build_debug_tab(debug_tab)
+        self._style_tab_selector()
 
         self._log("Application started.\n", "success")
         self._log(f"Default device slot 1: {DEFAULT_DEVICE_ID}\n", "info")
@@ -838,196 +997,849 @@ class App:
         self._load_score_templates()
         self._update_device_controls()
 
+    def _on_tab_changed(self):
+        self._style_tab_selector()
+
+    def _style_tab_selector(self):
+        if self.tab_view is None:
+            return
+
+        segmented_button = getattr(self.tab_view, "_segmented_button", None)
+        if segmented_button is None:
+            return
+
+        try:
+            segmented_button.grid_configure(sticky=tk.W)
+        except tk.TclError:
+            return
+
+        try:
+            selected_tab = self.tab_view.get()
+        except tk.TclError:
+            selected_tab = "Main"
+
+        for tab_name, tab_button in getattr(segmented_button, "_buttons_dict", {}).items():
+            tab_button.configure(
+                fg_color=SURFACE_BG,
+                hover_color=SURFACE_ALT_BG,
+                text_color=TAB_SELECTED_TEXT_COLOR if tab_name == selected_tab else TEXT_MUTED_COLOR,
+            )
+
+    def _section(self, parent, title):
+        section = ctk.CTkFrame(
+            parent,
+            fg_color=SURFACE_BG,
+            corner_radius=8,
+            border_width=1,
+            border_color=BORDER_COLOR,
+        )
+        title_label = ctk.CTkLabel(
+            section,
+            text=title,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=TEXT_COLOR,
+            anchor="w",
+        )
+        title_label.pack(fill=tk.X, padx=12, pady=(10, 4))
+        body = ctk.CTkFrame(section, fg_color="transparent")
+        body.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+        return section, body
+
+    def _button(self, parent, text, command, width=112, state=tk.NORMAL, danger=False):
+        return ctk.CTkButton(
+            parent,
+            text=text,
+            command=command,
+            width=width,
+            height=30,
+            corner_radius=6,
+            fg_color=DANGER_COLOR if danger else ACCENT_COLOR,
+            hover_color=DANGER_HOVER_COLOR if danger else ACCENT_HOVER_COLOR,
+            text_color=TEXT_COLOR,
+            text_color_disabled="#6b7280",
+            state=state,
+        )
+
     def _build_main_tab(self, parent):
-        main_frame = ttk.Frame(parent, padding=10)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
         self._build_device_settings(main_frame)
 
-        main_log_frame = ttk.LabelFrame(main_frame, text="Main Log", padding=5)
-        main_log_frame.pack(fill=tk.BOTH, expand=True)
+        main_log_section, main_log_frame = self._section(main_frame, "Main Log")
+        main_log_section.pack(fill=tk.BOTH, expand=True)
 
-        main_log_filter_frame = ttk.Frame(main_log_frame)
+        main_log_filter_frame = ctk.CTkFrame(main_log_frame, fg_color="transparent")
         main_log_filter_frame.pack(fill=tk.X, pady=(0, 5))
-        ttk.Label(main_log_filter_frame, text="Device:").pack(side=tk.LEFT, padx=(0, 5))
-        self.main_log_filter_combo = ttk.Combobox(
+        ctk.CTkLabel(
             main_log_filter_frame,
-            textvariable=self.main_log_filter_var,
+            text="Device:",
+            text_color=TEXT_MUTED_COLOR,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        self.main_log_filter_combo = ctk.CTkComboBox(
+            main_log_filter_frame,
+            variable=self.main_log_filter_var,
+            values=[MAIN_LOG_FILTER_ALL],
             state="readonly",
-            width=34,
+            width=280,
+            height=30,
+            corner_radius=6,
+            fg_color=LOG_BG,
+            border_color=BORDER_COLOR,
+            button_color=SURFACE_ALT_BG,
+            button_hover_color=BORDER_COLOR,
+            dropdown_fg_color=SURFACE_BG,
+            dropdown_hover_color=SURFACE_ALT_BG,
+            text_color=TEXT_COLOR,
+            dropdown_text_color=TEXT_COLOR,
+            command=lambda _choice: self._on_main_log_filter_changed(),
         )
         self.main_log_filter_combo.pack(side=tk.LEFT)
-        self.main_log_filter_combo.bind("<<ComboboxSelected>>", self._on_main_log_filter_changed)
 
-        self.main_log_widget = scrolledtext.ScrolledText(
-            main_log_frame, wrap=tk.WORD, width=70, height=18,
-            font=("Consolas", 10), bg="#1e1e1e", fg="#d4d4d4",
-            insertbackground="white"
+        self.main_log_widget = ctk.CTkTextbox(
+            main_log_frame,
+            wrap=tk.WORD,
+            height=320,
+            font=("Consolas", 10),
+            fg_color=LOG_BG,
+            text_color=TEXT_COLOR,
+            corner_radius=6,
+            border_width=1,
+            border_color=BORDER_COLOR,
+            scrollbar_button_color=BORDER_COLOR,
+            scrollbar_button_hover_color=ACCENT_COLOR,
         )
         self.main_log_widget.pack(fill=tk.BOTH, expand=True)
         self._configure_log_tags(self.main_log_widget)
         self._update_main_log_filter_options()
 
     def _build_debug_tab(self, parent):
-        main_frame = ttk.Frame(parent, padding=10)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
-        self._build_device_settings(main_frame)
+        coord_section, coord_frame = self._section(main_frame, "Coordinate Picker")
+        coord_section.pack(fill=tk.X, pady=(0, 8))
 
-        coord_frame = ttk.LabelFrame(main_frame, text="Coordinate Picker", padding=5)
-        coord_frame.pack(fill=tk.X, pady=(0, 5))
+        self.find_pos_btn = self._button(coord_frame, "Find Position", self._on_find_position, width=128)
+        self.find_pos_btn.pack(side=tk.LEFT, padx=(0, 8))
 
-        self.find_pos_btn = ttk.Button(coord_frame, text="Find Position", command=self._on_find_position)
-        self.find_pos_btn.pack(side=tk.LEFT, padx=(0, 5))
+        self.stop_pos_btn = self._button(
+            coord_frame,
+            "Stop Picker",
+            self._on_stop_picker,
+            width=118,
+            state=tk.DISABLED,
+            danger=True,
+        )
+        self.stop_pos_btn.pack(side=tk.LEFT, padx=(0, 8))
 
-        self.stop_pos_btn = ttk.Button(coord_frame, text="Stop Picker", command=self._on_stop_picker, state=tk.DISABLED)
-        self.stop_pos_btn.pack(side=tk.LEFT, padx=(0, 5))
-
-        self.capture_once_btn = ttk.Button(coord_frame, text="Capture Once", command=self._on_capture_once)
+        self.capture_once_btn = self._button(coord_frame, "Capture Once", self._on_capture_once, width=128)
         self.capture_once_btn.pack(side=tk.LEFT)
 
-        bot_frame = ttk.LabelFrame(main_frame, text="Bot Control", padding=5)
-        bot_frame.pack(fill=tk.X, pady=(0, 5))
+        bot_section, bot_frame = self._section(main_frame, "Bot Control")
+        bot_section.pack(fill=tk.X, pady=(0, 8))
 
         self.bot_info_var = tk.StringVar(value="Ready")
-        self.bot_info_lbl = ttk.Label(bot_frame, textvariable=self.bot_info_var, foreground="gray")
-        self.bot_info_lbl.pack(side=tk.LEFT, padx=(0, 10))
-
-        self.run_bot_btn = ttk.Button(bot_frame, text="Run Full Flow", command=self._on_run_bot)
-        self.run_bot_btn.pack(side=tk.LEFT, padx=(0, 5))
-
-        self.run_score_btn = ttk.Button(bot_frame, text="Run Score Flow", command=self._on_run_score_flow)
-        self.run_score_btn.pack(side=tk.LEFT, padx=(0, 5))
-
-        self.run_pet_img_test_btn = ttk.Button(
+        self.bot_info_lbl = ctk.CTkLabel(
             bot_frame,
-            text="Run Test Img pet",
-            command=self._on_run_pet_img_test,
+            textvariable=self.bot_info_var,
+            text_color=TEXT_MUTED_COLOR,
+            width=92,
+            anchor="w",
         )
-        self.run_pet_img_test_btn.pack(side=tk.LEFT, padx=(0, 5))
+        self.bot_info_lbl.pack(side=tk.LEFT, padx=(0, 12))
 
-        self.stop_bot_btn = ttk.Button(bot_frame, text="Stop All", command=self._on_stop_bot, state=tk.DISABLED)
+        self.run_bot_btn = self._button(bot_frame, "Run Full Flow", self._on_run_bot, width=118)
+        self.run_bot_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.run_score_btn = self._button(bot_frame, "Run Score Flow", self._on_run_score_flow, width=128)
+        self.run_score_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.run_pet_img_test_btn = self._button(
+            bot_frame, "Run Test Img pet", self._on_run_pet_img_test, width=132
+        )
+        self.run_pet_img_test_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.stop_bot_btn = self._button(
+            bot_frame, "Stop All", self._on_stop_bot, width=92, state=tk.DISABLED, danger=True
+        )
         self.stop_bot_btn.pack(side=tk.LEFT)
 
         self.loop_var = tk.BooleanVar(value=True)
-        self.loop_check = ttk.Checkbutton(
-            bot_frame, text="Loop", variable=self.loop_var
+        self.loop_check = ctk.CTkCheckBox(
+            bot_frame,
+            text="Loop",
+            variable=self.loop_var,
+            fg_color=ACCENT_COLOR,
+            hover_color=ACCENT_HOVER_COLOR,
+            border_color=BORDER_COLOR,
+            text_color=TEXT_COLOR,
         )
         self.loop_check.pack(side=tk.RIGHT, padx=(10, 0))
 
-        step_frame = ttk.LabelFrame(main_frame, text="Step Control", padding=5)
-        step_frame.pack(fill=tk.X, pady=(0, 5))
+        step_section, step_frame = self._section(main_frame, "Step Control")
+        step_section.pack(fill=tk.X, pady=(0, 8))
+        self.debug_group_picker_parent = step_frame
+        self.debug_step_picker_parent = step_frame
+        step_frame.grid_columnconfigure(1, weight=1)
 
         self.group_label_to_key = {
             f"{data['label']} ({len(resolve_group_steps(key))} steps)": key
             for key, data in STEP_GROUPS.items()
         }
-        ttk.Label(step_frame, text="Group:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5), pady=2)
+        ctk.CTkLabel(step_frame, text="Group:", text_color=TEXT_MUTED_COLOR).grid(
+            row=0, column=0, sticky=tk.W, padx=(0, 8), pady=4
+        )
         self.group_var = tk.StringVar(value=next(iter(self.group_label_to_key)))
-        self.group_combo = ttk.Combobox(
+        self.group_combo = ctk.CTkEntry(
             step_frame,
             textvariable=self.group_var,
-            values=list(self.group_label_to_key.keys()),
             state="readonly",
-            width=34,
+            width=320,
+            height=30,
+            corner_radius=6,
+            fg_color=LOG_BG,
+            border_color=BORDER_COLOR,
+            text_color=TEXT_COLOR,
         )
-        self.group_combo.grid(row=0, column=1, sticky=tk.W, padx=(0, 5), pady=2)
-        self.run_group_btn = ttk.Button(step_frame, text="Run Group", command=self._on_run_group)
-        self.run_group_btn.grid(row=0, column=2, sticky=tk.W, padx=(0, 10), pady=2)
+        self.group_combo.grid(row=0, column=1, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._button(step_frame, "Select", self._open_debug_group_picker, width=82).grid(
+            row=0, column=2, sticky=tk.W, padx=(0, 8), pady=4
+        )
+        self.run_group_btn = self._button(step_frame, "Run Group", self._on_run_group, width=110)
+        self.run_group_btn.grid(row=0, column=3, sticky=tk.W, pady=4)
 
         self.step_label_to_index = {
             get_step_label(step, index): index - 1
             for index, step in enumerate(STEPS, 1)
         }
-        ttk.Label(step_frame, text="Single Step:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=2)
+        ctk.CTkLabel(step_frame, text="Single Step:", text_color=TEXT_MUTED_COLOR).grid(
+            row=2, column=0, sticky=tk.W, padx=(0, 8), pady=4
+        )
         self.step_var = tk.StringVar(value=next(iter(self.step_label_to_index)))
-        self.step_combo = ttk.Combobox(
+        self.step_combo = ctk.CTkEntry(
             step_frame,
             textvariable=self.step_var,
-            values=list(self.step_label_to_index.keys()),
             state="readonly",
-            width=52,
+            width=460,
+            height=30,
+            corner_radius=6,
+            fg_color=LOG_BG,
+            border_color=BORDER_COLOR,
+            text_color=TEXT_COLOR,
         )
-        self.step_combo.grid(row=1, column=1, sticky=tk.W, padx=(0, 5), pady=2)
-        self.run_step_btn = ttk.Button(step_frame, text="Run Step", command=self._on_run_step)
-        self.run_step_btn.grid(row=1, column=2, sticky=tk.W, padx=(0, 10), pady=2)
+        self.step_combo.grid(row=2, column=1, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._button(step_frame, "Select", self._open_debug_step_picker, width=82).grid(
+            row=2, column=2, sticky=tk.W, padx=(0, 8), pady=4
+        )
+        self.run_step_btn = self._button(step_frame, "Run Step", self._on_run_step, width=110)
+        self.run_step_btn.grid(row=2, column=3, sticky=tk.W, pady=4)
 
-        log_frame = ttk.LabelFrame(main_frame, text="Log", padding=5)
-        log_frame.pack(fill=tk.BOTH, expand=True)
+        log_section, log_frame = self._section(main_frame, "Log")
+        log_section.pack(fill=tk.BOTH, expand=True)
 
-        self.log_widget = scrolledtext.ScrolledText(
-            log_frame, wrap=tk.WORD, width=70, height=15,
-            font=("Consolas", 10), bg="#1e1e1e", fg="#d4d4d4",
-            insertbackground="white"
+        self.log_widget = ctk.CTkTextbox(
+            log_frame,
+            wrap=tk.WORD,
+            height=260,
+            font=("Consolas", 10),
+            fg_color=LOG_BG,
+            text_color=TEXT_COLOR,
+            corner_radius=6,
+            border_width=1,
+            border_color=BORDER_COLOR,
+            scrollbar_button_color=BORDER_COLOR,
+            scrollbar_button_hover_color=ACCENT_COLOR,
         )
         self.log_widget.pack(fill=tk.BOTH, expand=True)
         self._configure_log_tags(self.log_widget)
 
+    def _build_config_tab(self, parent):
+        main_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        self._build_step_config(main_frame)
+        self._build_notification_settings(main_frame)
+
+    def _build_step_config(self, parent):
+        config_section, config_frame = self._section(parent, "Step Config")
+        config_section.pack(fill=tk.X, pady=(0, 8))
+        self.config_step_picker_parent = config_frame
+
+        self.config_step_label_to_index = {
+            get_step_label(step, index): index - 1
+            for index, step in enumerate(STEPS, 1)
+        }
+        first_step_label = next(iter(self.config_step_label_to_index), "")
+        self.config_step_var.set(first_step_label)
+
+        ctk.CTkLabel(config_frame, text="Step:", text_color=TEXT_MUTED_COLOR).grid(
+            row=0, column=0, sticky=tk.W, padx=(0, 8), pady=4
+        )
+        self.config_step_combo = ctk.CTkEntry(
+            config_frame,
+            textvariable=self.config_step_var,
+            state="readonly",
+            width=280,
+            height=30,
+            corner_radius=6,
+            fg_color=LOG_BG,
+            border_color=BORDER_COLOR,
+            text_color=TEXT_COLOR,
+        )
+        self.config_step_combo.grid(row=0, column=1, sticky=tk.W, pady=4)
+        self._button(config_frame, "Select", self._open_config_step_picker, width=82).grid(
+            row=0, column=2, sticky=tk.W, padx=(8, 0), pady=4
+        )
+
+        ctk.CTkLabel(config_frame, text="Step Text:", text_color=TEXT_MUTED_COLOR).grid(
+            row=2, column=0, sticky=tk.W, padx=(0, 8), pady=4
+        )
+        ctk.CTkEntry(
+            config_frame,
+            textvariable=self.config_step_text_var,
+            fg_color=LOG_BG,
+            border_color=BORDER_COLOR,
+            text_color=TEXT_COLOR,
+            width=280,
+            height=30,
+            corner_radius=6,
+        ).grid(row=2, column=1, sticky=tk.W, pady=4)
+
+        self.config_step_value_label = ctk.CTkLabel(config_frame, text="Text Value:", text_color=TEXT_MUTED_COLOR)
+        self.config_step_value_label.grid(
+            row=3, column=0, sticky=tk.W, padx=(0, 8), pady=4
+        )
+        self.config_step_value_entry = ctk.CTkEntry(
+            config_frame,
+            textvariable=self.config_step_value_var,
+            fg_color=LOG_BG,
+            border_color=BORDER_COLOR,
+            text_color=TEXT_COLOR,
+            width=280,
+            height=30,
+            corner_radius=6,
+        )
+        self.config_step_value_entry.grid(row=3, column=1, sticky=tk.W, pady=4)
+
+        self.config_step_coord_frame = ctk.CTkFrame(config_frame, fg_color="transparent")
+        self.config_step_coord_frame.grid(row=4, column=1, columnspan=5, sticky=tk.W, pady=4)
+
+        ctk.CTkLabel(self.config_step_coord_frame, text="X:", text_color=TEXT_MUTED_COLOR).pack(
+            side=tk.LEFT, padx=(0, 8)
+        )
+        self.config_step_x_entry = ctk.CTkEntry(
+            self.config_step_coord_frame,
+            textvariable=self.config_step_x_var,
+            fg_color=LOG_BG,
+            border_color=BORDER_COLOR,
+            text_color=TEXT_COLOR,
+            width=90,
+            height=30,
+            corner_radius=6,
+        )
+        self.config_step_x_entry.pack(side=tk.LEFT)
+
+        ctk.CTkLabel(self.config_step_coord_frame, text="Y:", text_color=TEXT_MUTED_COLOR).pack(
+            side=tk.LEFT, padx=(12, 6)
+        )
+        self.config_step_y_entry = ctk.CTkEntry(
+            self.config_step_coord_frame,
+            textvariable=self.config_step_y_var,
+            fg_color=LOG_BG,
+            border_color=BORDER_COLOR,
+            text_color=TEXT_COLOR,
+            width=90,
+            height=30,
+            corner_radius=6,
+        )
+        self.config_step_y_entry.pack(side=tk.LEFT)
+
+        ctk.CTkLabel(self.config_step_coord_frame, text="Time:", text_color=TEXT_MUTED_COLOR).pack(
+            side=tk.LEFT, padx=(12, 6)
+        )
+        ctk.CTkEntry(
+            self.config_step_coord_frame,
+            textvariable=self.config_step_time_var,
+            fg_color=LOG_BG,
+            border_color=BORDER_COLOR,
+            text_color=TEXT_COLOR,
+            width=90,
+            height=30,
+            corner_radius=6,
+        ).pack(side=tk.LEFT)
+
+        self.config_step_save_btn = self._button(config_frame, "Save Step", self._on_save_config_step, width=108)
+        self.config_step_save_btn.grid(
+            row=5, column=1, sticky=tk.W, padx=(0, 8), pady=(8, 0)
+        )
+        self.config_step_reload_btn = self._button(config_frame, "Reload", self._load_config_step_fields, width=90)
+        self.config_step_reload_btn.grid(
+            row=5, column=2, sticky=tk.W, pady=(8, 0)
+        )
+        self.config_step_status_label = ctk.CTkLabel(
+            config_frame,
+            textvariable=self.config_step_status_var,
+            text_color=TEXT_MUTED_COLOR,
+            anchor="w",
+        )
+        self.config_step_status_label.grid(row=5, column=3, columnspan=3, sticky=tk.W, padx=(12, 0), pady=(8, 0))
+
+        self._load_config_step_fields()
+
     def _build_device_settings(self, parent):
-        settings_frame = ttk.LabelFrame(parent, text="Device Settings", padding=10)
-        settings_frame.pack(fill=tk.X, pady=(0, 10))
+        settings_section, settings_frame = self._section(parent, "Device Settings")
+        settings_section.pack(fill=tk.X, pady=(0, 8))
+        settings_frame.grid_columnconfigure(1, weight=1)
 
         for slot in range(MAX_DEVICE_SLOTS):
-            ttk.Label(settings_frame, text=f"Device {slot + 1}:").grid(
-                row=slot, column=0, sticky=tk.W, padx=(0, 5), pady=2
+            ctk.CTkLabel(
+                settings_frame,
+                text=f"Device {slot + 1}:",
+                text_color=TEXT_MUTED_COLOR,
+                width=70,
+                anchor="w",
+            ).grid(
+                row=slot, column=0, sticky=tk.W, padx=(0, 8), pady=4
             )
 
-            ttk.Entry(settings_frame, textvariable=self.device_id_vars[slot], width=30).grid(
-                row=slot, column=1, sticky=tk.W, padx=(0, 10), pady=2
-            )
-            ttk.Label(settings_frame, textvariable=self.device_status_vars[slot], width=18, foreground="gray").grid(
-                row=slot, column=2, sticky=tk.W, padx=(0, 10), pady=2
-            )
-            ttk.Label(settings_frame, text="Target:").grid(
-                row=slot, column=3, sticky=tk.W, padx=(0, 5), pady=2
-            )
-            score_target_combo = ttk.Combobox(
+            ctk.CTkEntry(
                 settings_frame,
-                textvariable=self.device_score_target_vars[slot],
+                textvariable=self.device_id_vars[slot],
+                fg_color=LOG_BG,
+                border_color=BORDER_COLOR,
+                text_color=TEXT_COLOR,
+                height=30,
+                corner_radius=6,
+            ).grid(
+                row=slot, column=1, sticky=tk.EW, padx=(0, 10), pady=4
+            )
+            ctk.CTkLabel(
+                settings_frame,
+                textvariable=self.device_status_vars[slot],
+                width=130,
+                text_color=TEXT_MUTED_COLOR,
+                anchor="w",
+            ).grid(
+                row=slot, column=2, sticky=tk.W, padx=(0, 10), pady=4
+            )
+            ctk.CTkLabel(settings_frame, text="Target:", text_color=TEXT_MUTED_COLOR).grid(
+                row=slot, column=3, sticky=tk.W, padx=(0, 6), pady=4
+            )
+            score_target_combo = ctk.CTkComboBox(
+                settings_frame,
+                variable=self.device_score_target_vars[slot],
                 values=SCORE_TARGET_CHOICES,
                 state="readonly",
-                width=3,
+                width=64,
+                height=30,
+                corner_radius=6,
+                fg_color=LOG_BG,
+                border_color=BORDER_COLOR,
+                button_color=SURFACE_ALT_BG,
+                button_hover_color=BORDER_COLOR,
+                dropdown_fg_color=SURFACE_BG,
+                dropdown_hover_color=SURFACE_ALT_BG,
+                text_color=TEXT_COLOR,
+                dropdown_text_color=TEXT_COLOR,
             )
-            score_target_combo.grid(row=slot, column=4, sticky=tk.W, padx=(0, 10), pady=2)
-            score_btn = ttk.Button(
+            score_target_combo.grid(row=slot, column=4, sticky=tk.W, padx=(0, 10), pady=4)
+            score_btn = self._button(
                 settings_frame,
-                text="Run Score",
-                command=lambda slot_index=slot: self._on_run_score_for_slot(slot_index),
+                "Run Score",
+                lambda slot_index=slot: self._on_run_score_for_slot(slot_index),
+                width=100,
             )
-            score_btn.grid(row=slot, column=5, sticky=tk.W, padx=(0, 5), pady=2)
-            stop_btn = ttk.Button(
+            score_btn.grid(row=slot, column=5, sticky=tk.W, padx=(0, 6), pady=4)
+            stop_btn = self._button(
                 settings_frame,
-                text="Stop",
-                command=lambda slot_index=slot: self._on_stop_slot(slot_index),
+                "Stop",
+                lambda slot_index=slot: self._on_stop_slot(slot_index),
+                width=72,
                 state=tk.DISABLED,
+                danger=True,
             )
-            stop_btn.grid(row=slot, column=6, sticky=tk.W, padx=(0, 10), pady=2)
+            stop_btn.grid(row=slot, column=6, sticky=tk.W, padx=(0, 12), pady=4)
             self.device_score_target_controls[slot].append(score_target_combo)
             self.device_score_buttons[slot].append(score_btn)
             self.device_stop_buttons[slot].append(stop_btn)
 
-        ttk.Button(settings_frame, text="Reset ADB & Find", command=self._on_reset_adb).grid(
-            row=0, column=7, padx=5
+        self._button(settings_frame, "Reset ADB & Find", self._on_reset_adb, width=148).grid(
+            row=0, column=7, sticky=tk.EW, padx=(0, 0), pady=4
         )
-        ttk.Button(settings_frame, text="List Devices", command=self._on_list_devices).grid(
-            row=1, column=7, padx=5
+        self._button(settings_frame, "List Devices", self._on_list_devices, width=148).grid(
+            row=1, column=7, sticky=tk.EW, padx=(0, 0), pady=4
         )
-        ttk.Button(settings_frame, text="Fill Found Devices", command=self._on_fill_devices).grid(
-            row=2, column=7, padx=5
+        self._button(settings_frame, "Fill Found Devices", self._on_fill_devices, width=148).grid(
+            row=2, column=7, sticky=tk.EW, padx=(0, 0), pady=4
         )
 
+    def _toggle_inline_picker(self, picker_attr, parent, row, column, columnspan, width, labels, on_select):
+        picker = getattr(self, picker_attr)
+        if picker is not None and picker.winfo_exists():
+            picker.destroy()
+            setattr(self, picker_attr, None)
+            return
+
+        picker = ctk.CTkScrollableFrame(
+            parent,
+            fg_color=SURFACE_BG,
+            corner_radius=8,
+            border_width=1,
+            border_color=BORDER_COLOR,
+            width=width,
+            height=300,
+        )
+        setattr(self, picker_attr, picker)
+        picker.grid(row=row, column=column, columnspan=columnspan, sticky=tk.W, pady=(2, 8))
+
+        def close_picker():
+            if picker is not None and picker.winfo_exists():
+                picker.destroy()
+            setattr(self, picker_attr, None)
+
+        for label in labels:
+            ctk.CTkButton(
+                picker,
+                text=label,
+                command=lambda selected=label: (on_select(selected), close_picker()),
+                height=30,
+                corner_radius=4,
+                fg_color="transparent",
+                hover_color=SURFACE_ALT_BG,
+                text_color=TEXT_COLOR,
+                anchor="w",
+            ).pack(fill=tk.X, padx=4, pady=1)
+
+    def _open_debug_group_picker(self):
+        self._toggle_inline_picker(
+            "debug_group_picker",
+            self.debug_group_picker_parent,
+            1,
+            1,
+            3,
+            520,
+            list(self.group_label_to_key.keys()),
+            self.group_var.set,
+        )
+
+    def _open_debug_step_picker(self):
+        self._toggle_inline_picker(
+            "debug_step_picker",
+            self.debug_step_picker_parent,
+            3,
+            1,
+            3,
+            520,
+            list(self.step_label_to_index.keys()),
+            self.step_var.set,
+        )
+
+    def _open_config_step_picker(self):
+        self._toggle_inline_picker(
+            "config_step_picker",
+            self.config_step_picker_parent,
+            1,
+            1,
+            3,
+            520,
+            list(self.config_step_label_to_index.keys()),
+            self._select_config_step,
+        )
+
+    def _close_config_step_picker(self):
+        if self.config_step_picker is not None and self.config_step_picker.winfo_exists():
+            self.config_step_picker.destroy()
+        self.config_step_picker = None
+
+    def _select_config_step(self, selected_label):
+        self.config_step_var.set(selected_label)
+        self._load_config_step_fields()
+        self._close_config_step_picker()
+
+    def _load_step_config_overrides(self):
+        loaded = 0
+        for raw_index, config in self.step_config_overrides.items():
+            if not isinstance(config, dict):
+                continue
+            try:
+                step_index = int(raw_index)
+            except ValueError:
+                continue
+            if step_index < 0 or step_index >= len(STEPS):
+                continue
+
+            step = STEPS[step_index]
+            action = step[0]
+            try:
+                delay = float(config.get("time", step[-2]))
+            except (TypeError, ValueError):
+                continue
+            if delay < 0:
+                continue
+
+            note = str(config.get("note", step[-1]))
+            if action == "tap":
+                try:
+                    x = int(config.get("x", step[1]))
+                    y = int(config.get("y", step[2]))
+                except (TypeError, ValueError):
+                    continue
+                if x < 0 or y < 0:
+                    continue
+                new_step = ("tap", x, y, delay, note)
+            elif action == "text":
+                text_value = str(config.get("value", step[1]))
+                new_step = ("text", text_value, delay, note)
+            elif action == "keyevent":
+                new_step = ("keyevent", step[1], delay, note)
+            else:
+                continue
+
+            self._replace_step_everywhere(step_index, new_step)
+            loaded += 1
+        return loaded
+
+    def _selected_config_step_index(self):
+        return self.config_step_label_to_index.get(self.config_step_var.get())
+
+    def _set_config_text_value_visible(self, visible):
+        coord_row = 4 if visible else 3
+        button_row = coord_row + 1
+
+        if self.config_step_value_label is not None:
+            if visible:
+                self.config_step_value_label.grid()
+            else:
+                self.config_step_value_label.grid_remove()
+        if self.config_step_value_entry is not None:
+            if visible:
+                self.config_step_value_entry.grid()
+            else:
+                self.config_step_value_entry.grid_remove()
+        if self.config_step_coord_frame is not None:
+            self.config_step_coord_frame.grid_configure(row=coord_row)
+        if self.config_step_save_btn is not None:
+            self.config_step_save_btn.grid_configure(row=button_row)
+        if self.config_step_reload_btn is not None:
+            self.config_step_reload_btn.grid_configure(row=button_row)
+        if self.config_step_status_label is not None:
+            self.config_step_status_label.grid_configure(row=button_row)
+
+    def _load_config_step_fields(self):
+        step_index = self._selected_config_step_index()
+        if step_index is None:
+            self.config_step_action_var.set("-")
+            self.config_step_note_var.set("-")
+            self.config_step_x_var.set("")
+            self.config_step_y_var.set("")
+            self.config_step_time_var.set("")
+            self.config_step_text_var.set("")
+            self.config_step_value_var.set("")
+            self._set_config_text_value_visible(False)
+            self.config_step_status_var.set("Select a step to edit")
+            return
+
+        step = STEPS[step_index]
+        action = step[0]
+        self.config_step_action_var.set(action)
+        self.config_step_note_var.set(step[-1])
+        self.config_step_time_var.set(str(float(step[-2])))
+        self.config_step_text_var.set(step[-1])
+
+        x_y_state = tk.NORMAL if action == "tap" else tk.DISABLED
+        value_state = tk.NORMAL if action == "text" else tk.DISABLED
+        self._set_config_text_value_visible(action == "text")
+        if action == "tap":
+            self.config_step_x_var.set(str(step[1]))
+            self.config_step_y_var.set(str(step[2]))
+        else:
+            self.config_step_x_var.set("")
+            self.config_step_y_var.set("")
+
+        if action == "text":
+            self.config_step_value_var.set(str(step[1]))
+        else:
+            self.config_step_value_var.set("")
+
+        if self.config_step_x_entry is not None:
+            self.config_step_x_entry.configure(state=x_y_state)
+        if self.config_step_y_entry is not None:
+            self.config_step_y_entry.configure(state=x_y_state)
+        if self.config_step_value_entry is not None:
+            self.config_step_value_entry.configure(state=value_state)
+        self.config_step_status_var.set(f"Loaded step {step_index + 1}")
+
+    def _replace_step_everywhere(self, step_index, new_step):
+        old_step = STEPS[step_index]
+        STEPS[step_index] = new_step
+        for group in STEP_GROUPS.values():
+            group_steps = group.get("steps")
+            if not group_steps:
+                continue
+            for index, step in enumerate(group_steps):
+                if step is old_step:
+                    group_steps[index] = new_step
+
+    def _refresh_step_selectors(self, selected_step_index):
+        self.config_step_label_to_index = {
+            get_step_label(step, index): index - 1
+            for index, step in enumerate(STEPS, 1)
+        }
+        selected_config_label = get_step_label(STEPS[selected_step_index], selected_step_index + 1)
+        self.config_step_var.set(selected_config_label)
+
+        self.step_label_to_index = {
+            get_step_label(step, index): index - 1
+            for index, step in enumerate(STEPS, 1)
+        }
+        step_combo = getattr(self, "step_combo", None)
+        if step_combo is not None:
+            self.step_var.set(selected_config_label)
+
+    def _on_save_config_step(self):
+        step_index = self._selected_config_step_index()
+        if step_index is None:
+            self.config_step_status_var.set("No step selected")
+            return
+
+        step = STEPS[step_index]
+        action = step[0]
+        note = self.config_step_text_var.get().strip()
+        if not note:
+            self.config_step_status_var.set("Step Text is required")
+            return
+
+        try:
+            delay = float(self.config_step_time_var.get().strip())
+        except ValueError:
+            self.config_step_status_var.set("Time must be a number")
+            return
+        if delay < 0:
+            self.config_step_status_var.set("Time must be >= 0")
+            return
+
+        if action == "tap":
+            try:
+                x = int(self.config_step_x_var.get().strip())
+                y = int(self.config_step_y_var.get().strip())
+            except ValueError:
+                self.config_step_status_var.set("X and Y must be integers")
+                return
+            if x < 0 or y < 0:
+                self.config_step_status_var.set("X and Y must be >= 0")
+                return
+            new_step = ("tap", x, y, delay, note)
+        elif action == "text":
+            text_value = self.config_step_value_var.get()
+            if not text_value:
+                self.config_step_status_var.set("Text Value is required")
+                return
+            new_step = ("text", text_value, delay, note)
+        elif action == "keyevent":
+            new_step = ("keyevent", step[1], delay, note)
+        else:
+            self.config_step_status_var.set(f"Unsupported action: {action}")
+            return
+
+        self._replace_step_everywhere(step_index, new_step)
+        self._refresh_step_selectors(step_index)
+        step_config = {"time": delay, "note": note}
+        if action == "tap":
+            step_config["x"] = x
+            step_config["y"] = y
+        elif action == "text":
+            step_config["value"] = text_value
+        self.step_config_overrides[str(step_index)] = step_config
+        try:
+            write_step_config_overrides(self.step_config_overrides)
+        except OSError as exc:
+            self.config_step_status_var.set("Saved in memory; file save failed")
+            self._log(f"Step config file save failed: {exc}\n", "error")
+            return
+
+        self.config_step_status_var.set(f"Saved step {step_index + 1}")
+        self._log(f"Config updated step {step_index + 1}: {get_step_label(new_step)}\n", "success")
+
+    def _build_notification_settings(self, parent):
+        notification_section, notification_frame = self._section(parent, "Notifications")
+        notification_section.pack(fill=tk.X, pady=(0, 8))
+        notification_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            notification_frame,
+            text="Discord Webhook:",
+            text_color=TEXT_MUTED_COLOR,
+            anchor="w",
+        ).grid(row=0, column=0, sticky=tk.W, padx=(0, 8), pady=4)
+
+        ctk.CTkEntry(
+            notification_frame,
+            textvariable=self.discord_webhook_var,
+            placeholder_text="Paste Discord webhook URL",
+            fg_color=LOG_BG,
+            border_color=BORDER_COLOR,
+            text_color=TEXT_COLOR,
+            height=30,
+            corner_radius=6,
+        ).grid(row=0, column=1, sticky=tk.EW, padx=(0, 8), pady=4)
+
+        self._button(
+            notification_frame,
+            "Save",
+            self._on_save_discord_webhook,
+            width=78,
+        ).grid(row=0, column=2, sticky=tk.W, padx=(0, 6), pady=4)
+
+        self._button(
+            notification_frame,
+            "Test",
+            self._on_test_discord_webhook,
+            width=78,
+        ).grid(row=0, column=3, sticky=tk.W, padx=(0, 8), pady=4)
+
+        ctk.CTkLabel(
+            notification_frame,
+            textvariable=self.discord_webhook_status_var,
+            text_color=TEXT_MUTED_COLOR,
+            anchor="w",
+            width=110,
+        ).grid(row=0, column=4, sticky=tk.W, pady=4)
+
+    def _text_widget(self, widget):
+        return getattr(widget, "_textbox", widget)
+
     def _configure_log_tags(self, widget):
-        widget.tag_config("info", foreground="#4ec9b0")
-        widget.tag_config("coord", foreground="#569cd6")
-        widget.tag_config("error", foreground="#f44747")
-        widget.tag_config("success", foreground="#6a9955")
-        widget.tag_config("warn", foreground="#dcdcaa")
+        text_widget = self._text_widget(widget)
+        text_widget.configure(
+            bg=LOG_BG,
+            fg=TEXT_COLOR,
+            insertbackground=TEXT_COLOR,
+            selectbackground=BORDER_COLOR,
+            relief="flat",
+            borderwidth=0,
+        )
+        text_widget.tag_config("info", foreground="#4ec9b0")
+        text_widget.tag_config("coord", foreground="#60a5fa")
+        text_widget.tag_config("error", foreground="#f87171")
+        text_widget.tag_config("success", foreground="#22c55e")
+        text_widget.tag_config("warn", foreground="#facc15")
+
+    def _insert_log_text(self, widget, text, tag=None):
+        text_widget = self._text_widget(widget)
+        if tag is None:
+            text_widget.insert(tk.END, text)
+        else:
+            text_widget.insert(tk.END, text, tag)
+        text_widget.see(tk.END)
+
+    def _delete_log_text(self, widget):
+        self._text_widget(widget).delete("1.0", tk.END)
 
     def _log(self, text, tag=None):
         if self.log_widget is None:
             return
-        self.log_widget.insert(tk.END, text, tag)
-        self.log_widget.see(tk.END)
+        self._insert_log_text(self.log_widget, text, tag)
 
     def safe_log(self, text, tag=None):
         self.root.after(0, lambda: self._log(text, tag))
@@ -1092,7 +1904,7 @@ class App:
             values.append(entry["device_label"] or self._main_log_filter_label(device_key))
             seen_keys.add(device_key)
 
-        self.main_log_filter_combo["values"] = values
+        self.main_log_filter_combo.configure(values=values)
         if selected_key is None:
             self.main_log_filter_var.set(MAIN_LOG_FILTER_ALL)
         else:
@@ -1111,11 +1923,10 @@ class App:
     def _render_main_log(self):
         if self.main_log_widget is None:
             return
-        self.main_log_widget.delete("1.0", tk.END)
+        self._delete_log_text(self.main_log_widget)
         for entry in self.main_log_entries:
             if self._main_log_entry_visible(entry):
-                self.main_log_widget.insert(tk.END, entry["text"], entry["tag"])
-        self.main_log_widget.see(tk.END)
+                self._insert_log_text(self.main_log_widget, entry["text"], entry["tag"])
 
     def _main_log(self, text, tag=None):
         if self.main_log_widget is None:
@@ -1132,6 +1943,79 @@ class App:
 
     def safe_main_log(self, text, tag=None):
         self.root.after(0, lambda: self._main_log(text, tag))
+
+    def _discord_webhook_url(self):
+        return self.discord_webhook_var.get().strip()
+
+    def _on_save_discord_webhook(self):
+        url = self._discord_webhook_url()
+        if url and not is_valid_discord_webhook_url(url):
+            self.discord_webhook_status_var.set("Invalid URL")
+            self._log("Discord webhook was not saved: invalid webhook URL.\n", "error")
+            return
+
+        try:
+            write_discord_webhook_url(url)
+        except OSError as exc:
+            self.discord_webhook_status_var.set("Save failed")
+            self._log(f"Discord webhook save failed: {exc}\n", "error")
+            return
+
+        if url:
+            self.discord_webhook_url = url
+            self.discord_webhook_status_var.set("Configured")
+            self._log("Discord webhook saved.\n", "success")
+        else:
+            self.discord_webhook_url = ""
+            self.discord_webhook_status_var.set("Not configured")
+            self._log("Discord webhook cleared.\n", "info")
+
+    def _on_test_discord_webhook(self):
+        url = self._discord_webhook_url()
+        if not url:
+            self.discord_webhook_status_var.set("Not configured")
+            self._log("Discord webhook test skipped: paste a webhook URL first.\n", "warn")
+            return
+        if not is_valid_discord_webhook_url(url):
+            self.discord_webhook_status_var.set("Invalid URL")
+            self._log("Discord webhook test skipped: invalid webhook URL.\n", "error")
+            return
+
+        self.discord_webhook_status_var.set("Testing...")
+        self._send_discord_webhook_async(url, "MuMu Reroll Bot webhook test.", log_success=True)
+
+    def notify_discord_result(self, title, detail):
+        url = self.discord_webhook_url
+        if not url:
+            return
+        if not is_valid_discord_webhook_url(url):
+            self.safe_log("Discord notification skipped: invalid webhook URL.\n", "error")
+            self.root.after(0, lambda: self.discord_webhook_status_var.set("Invalid URL"))
+            return
+
+        content = f"**{title}**\n{detail}"
+        self._send_discord_webhook_async(url, content, log_success=False)
+
+    def _send_discord_webhook_async(self, url, content, log_success):
+        content = content[:1900]
+
+        def worker():
+            try:
+                status = post_discord_webhook(url, content)
+            except (OSError, urllib.error.URLError, urllib.error.HTTPError) as exc:
+                self.safe_log(f"Discord webhook failed: {exc}\n", "warn")
+                self.root.after(0, lambda: self.discord_webhook_status_var.set("Send failed"))
+                return
+
+            if 200 <= status < 300:
+                if log_success:
+                    self.safe_log("Discord webhook test sent.\n", "success")
+                self.root.after(0, lambda: self.discord_webhook_status_var.set("Last send OK"))
+            else:
+                self.safe_log(f"Discord webhook returned HTTP {status}.\n", "warn")
+                self.root.after(0, lambda: self.discord_webhook_status_var.set("Send failed"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _load_select_templates(self):
         self.select_templates = load_select_templates()
@@ -1250,11 +2134,11 @@ class App:
         self.device_status_vars[slot_index].set(status)
 
     def _set_start_buttons_state(self, state):
-        self.run_bot_btn.config(state=state)
-        self.run_score_btn.config(state=state)
-        self.run_pet_img_test_btn.config(state=state)
-        self.run_group_btn.config(state=state)
-        self.run_step_btn.config(state=state)
+        self.run_bot_btn.configure(state=state)
+        self.run_score_btn.configure(state=state)
+        self.run_pet_img_test_btn.configure(state=state)
+        self.run_group_btn.configure(state=state)
+        self.run_step_btn.configure(state=state)
 
     def _slot_has_device(self, slot_index):
         return bool(self.device_id_vars[slot_index].get().strip())
@@ -1283,19 +2167,19 @@ class App:
             score_target_state = "readonly" if has_device and not is_running else tk.DISABLED
             stop_state = tk.NORMAL if is_running else tk.DISABLED
             for control in self.device_score_target_controls[slot_index]:
-                control.config(state=score_target_state)
+                control.configure(state=score_target_state)
             for button in self.device_score_buttons[slot_index]:
-                button.config(state=score_state)
+                button.configure(state=score_state)
             for button in self.device_stop_buttons[slot_index]:
-                button.config(state=stop_state)
+                button.configure(state=stop_state)
         self._update_main_log_filter_options()
 
     def _update_global_controls(self):
         any_running = any(runner and runner.running for runner in self.runners)
         self._set_start_buttons_state(tk.DISABLED if any_running else tk.NORMAL)
-        self.stop_bot_btn.config(state=tk.NORMAL if any_running else tk.DISABLED)
+        self.stop_bot_btn.configure(state=tk.NORMAL if any_running else tk.DISABLED)
         self.bot_info_var.set("Running..." if any_running else "Stopped")
-        self.bot_info_lbl.config(foreground="green" if any_running else "red")
+        self.bot_info_lbl.configure(text_color=SUCCESS_COLOR if any_running else DANGER_COLOR)
         self._update_device_controls()
 
     def _read_adb_devices(self):
@@ -1373,8 +2257,8 @@ class App:
         self._log("Controls: Left-click=coords | Right-click=tap | SPACE=pause | q=quit\n", "info")
         self._log("-" * 50 + "\n", "info")
 
-        self.find_pos_btn.config(state=tk.DISABLED)
-        self.stop_pos_btn.config(state=tk.NORMAL)
+        self.find_pos_btn.configure(state=tk.DISABLED)
+        self.stop_pos_btn.configure(state=tk.NORMAL)
 
         _coord_window_running = True
         _coord_thread = threading.Thread(target=self._run_coord_picker, args=(device_id,), daemon=True)
@@ -1383,8 +2267,8 @@ class App:
     def _on_stop_picker(self):
         global _coord_window_running
         _coord_window_running = False
-        self.find_pos_btn.config(state=tk.NORMAL)
-        self.stop_pos_btn.config(state=tk.DISABLED)
+        self.find_pos_btn.configure(state=tk.NORMAL)
+        self.stop_pos_btn.configure(state=tk.DISABLED)
         self._log("Coordinate picker stopped.\n\n", "info")
 
     def _on_capture_once(self):
@@ -1470,9 +2354,9 @@ class App:
         self._log("-" * 50 + "\n", "info")
 
         self._set_start_buttons_state(tk.DISABLED)
-        self.stop_bot_btn.config(state=tk.NORMAL)
+        self.stop_bot_btn.configure(state=tk.NORMAL)
         self.bot_info_var.set("Running...")
-        self.bot_info_lbl.config(foreground="green")
+        self.bot_info_lbl.configure(text_color=SUCCESS_COLOR)
 
         for device_id in device_ids[:MAX_DEVICE_SLOTS]:
             slot_index = self._find_device_slot(device_id)
@@ -1520,9 +2404,9 @@ class App:
         self._log("-" * 50 + "\n", "info")
 
         self._set_start_buttons_state(tk.DISABLED)
-        self.stop_bot_btn.config(state=tk.NORMAL)
+        self.stop_bot_btn.configure(state=tk.NORMAL)
         self.bot_info_var.set("Score Flow Running...")
-        self.bot_info_lbl.config(foreground="green")
+        self.bot_info_lbl.configure(text_color=SUCCESS_COLOR)
 
         for slot_index in start_slots:
             self._start_score_runner_for_slot(slot_index, load_templates=False)
@@ -1556,8 +2440,8 @@ class App:
         self.runners[slot_index] = runner
         self._set_device_status(slot_index, f"Score 0/{target_score}")
         self.bot_info_var.set("Score Flow Running...")
-        self.bot_info_lbl.config(foreground="green")
-        self.stop_bot_btn.config(state=tk.NORMAL)
+        self.bot_info_lbl.configure(text_color=SUCCESS_COLOR)
+        self.stop_bot_btn.configure(state=tk.NORMAL)
         self._set_start_buttons_state(tk.DISABLED)
         runner.start()
         self._update_device_controls()
@@ -1594,9 +2478,9 @@ class App:
         self._log("-" * 50 + "\n", "info")
 
         self._set_start_buttons_state(tk.DISABLED)
-        self.stop_bot_btn.config(state=tk.NORMAL)
+        self.stop_bot_btn.configure(state=tk.NORMAL)
         self.bot_info_var.set("Pet Image Test Running...")
-        self.bot_info_lbl.config(foreground="green")
+        self.bot_info_lbl.configure(text_color=SUCCESS_COLOR)
 
         for slot_index in start_slots:
             device_id = self.device_id_vars[slot_index].get().strip()
@@ -1631,9 +2515,9 @@ class App:
 
     def _bot_stopped(self):
         self._set_start_buttons_state(tk.NORMAL)
-        self.stop_bot_btn.config(state=tk.DISABLED)
+        self.stop_bot_btn.configure(state=tk.DISABLED)
         self.bot_info_var.set("Stopped")
-        self.bot_info_lbl.config(foreground="red")
+        self.bot_info_lbl.configure(text_color=DANGER_COLOR)
         self._update_device_controls()
 
     def _runner_finished(self, slot_index):
@@ -1691,8 +2575,8 @@ class App:
         cv2.destroyAllWindows()
         _coord_window_running = False
         self.safe_log("Coordinate picker window closed.\n\n", "info")
-        self.root.after(0, lambda: self.find_pos_btn.config(state=tk.NORMAL))
-        self.root.after(0, lambda: self.stop_pos_btn.config(state=tk.DISABLED))
+        self.root.after(0, lambda: self.find_pos_btn.configure(state=tk.NORMAL))
+        self.root.after(0, lambda: self.stop_pos_btn.configure(state=tk.DISABLED))
 
     def on_close(self):
         global _coord_window_running
@@ -1705,7 +2589,9 @@ class App:
 
 
 def main():
-    root = tk.Tk()
+    ctk.set_appearance_mode("dark")
+    ctk.set_default_color_theme("blue")
+    root = ctk.CTk()
     app = App(root)
     root.protocol("WM_DELETE_WINDOW", app.on_close)
     root.mainloop()

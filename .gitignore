@@ -6,6 +6,10 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+*.spec
+*.zip
+*.7z
+*.rar
 
 # Virtual environments
 .venv/

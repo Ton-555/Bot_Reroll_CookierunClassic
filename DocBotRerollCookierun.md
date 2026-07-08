@@ -1,45 +1,39 @@
 # DocBotRerollCookierun
 
-เอกสารนี้สรุปโครงสร้างและกระบวนการทำงานของโปรเจกต์ `Bot_reroll_cookierunV4` เพื่อให้ AI หรือนักพัฒนาคนอื่นเข้าใจระบบและทำงานต่อได้เร็ว
+เอกสารนี้สรุประบบปัจจุบันของโปรเจกต์ `Bot_reroll_cookierunV4` เพื่อให้ผู้ใช้หรือ AI ตัวอื่นอ่านต่อและแก้ระบบได้โดยไม่ต้องไล่เดา flow จากศูนย์
 
-## ภาพรวมระบบ
+## ภาพรวม
 
-โปรเจกต์นี้เป็นบอท reroll สำหรับเกม CookieRun ที่รันบน MuMu Player ผ่านคำสั่ง `adb` โดยใช้พิกัดหน้าจอแบบตายตัวเพื่อกดปุ่มตามลำดับที่กำหนดไว้ล่วงหน้า
+โปรเจกต์นี้เป็นบอท reroll CookieRun บน MuMu Player โดยสั่งงานผ่าน `adb` และใช้ OpenCV สำหรับ screenshot, template matching, coordinate picker และ flow ที่ตัดสินใจจากภาพ
 
-ระบบมี 2 วิธีใช้งานหลัก:
+ระบบปัจจุบันมี 2 ชั้นหลัก:
 
-1. รันบอทแบบ console ผ่าน `Bot.py`
-2. รันผ่าน GUI ผ่าน `Gui.py` ซึ่งมีปุ่มควบคุมบอท, log, list devices, device slots สูงสุด 6 เครื่อง และเครื่องมือเลือกพิกัด
+1. `Bot.py` เก็บ step, group, state group และฟังก์ชันยิงคำสั่ง ADB
+2. `Gui.py` เป็น GUI หลักแบบ `customtkinter` สำหรับรันหลาย device, debug step, score flow, pet image test, image matching และ Discord webhook notification
 
-ไฟล์ `CoordPicker.py` เป็นเครื่องมือ standalone สำหรับจับภาพหน้าจอ emulator แบบ live เพื่อคลิกดูพิกัดหรือทดสอบ tap
-
-## ไฟล์ในโปรเจกต์
+## ไฟล์สำคัญ
 
 ### `Bot.py`
 
-ไฟล์หลักของบอทแบบ command line
+หน้าที่หลัก:
 
-หน้าที่สำคัญ:
+- เก็บ `STEPS` ทั้งหมดแบบ 0-based index
+- แบ่ง `STEPS` เป็น `STEP_GROUPS`
+- รองรับ group ซ้อน group ผ่าน key `"groups"`
+- กำหนด `MAIN_FLOW` สำหรับปุ่ม Run Full Flow
+- ยิงคำสั่ง `tap`, `text`, `keyevent` ผ่าน ADB
+- เพิ่ม jitter พิกัดและ delay runtime เพื่อให้การกดไม่ตายตัวเกินไป
 
-- กำหนด `DEVICE_ID = "127.0.0.1:16384"` เป็น device เริ่มต้นของ MuMu Player
-- กำหนดรายการ action ทั้งหมดใน `STEPS`
-- กำหนดตัวแปรแยกกลุ่มงานใหม่ใน `STEP_GROUPS` โดยยังเก็บ `STEPS` เดิมไว้ครบ
-- กำหนดลำดับ flow หลักใน `MAIN_FLOW`
-- ส่งคำสั่ง ADB เพื่อ `tap`, `input text`, และ `keyevent`
-- รัน reroll เป็นรอบ ๆ แบบ infinite loop จนกด `Ctrl+C`
+ค่าคงที่สำคัญ:
 
-ฟังก์ชันหลัก:
+```python
+DEVICE_ID = "127.0.0.1:16384"
+TAP_POSITION_JITTER = 2
+DELAY_EXTRA_SECONDS_MIN = 0.0
+DELAY_EXTRA_SECONDS_MAX = 2.0
+```
 
-- `tap(device_id, x, y)` ส่งคำสั่ง `adb shell input tap x y`
-- `input_text(device_id, text)` ส่งคำสั่ง `adb shell input text ...`
-- `keyevent(device_id, keycode)` ส่งคำสั่ง `adb shell input keyevent ...`
-- `execute_step(device_id, step)` แปลง step แต่ละตัวเป็น action จริง
-- `get_steps_for_flow(group_keys=None)` รวม step จาก group ตามลำดับที่ส่งเข้าไป หรือใช้ `MAIN_FLOW` ถ้าไม่ส่งค่า
-- `get_step_label(step, index=None)` สร้างข้อความแสดง step สำหรับ GUI
-- `run_once(device_id)` รัน `STEPS` ครบหนึ่งรอบ
-- `main()` วนเรียก `run_once()` ไปเรื่อย ๆ
-
-รูปแบบข้อมูลใน `STEPS`:
+รูปแบบ step:
 
 ```python
 ("tap", x, y, delay_seconds, "description")
@@ -47,139 +41,88 @@
 ("keyevent", "KEYCODE_ENTER", delay_seconds, "description")
 ```
 
-ค่า `delay_seconds` อยู่รองสุดท้ายเสมอ และ `description` อยู่ท้ายสุด
+หมายเหตุ:
 
-ตอน runtime ระบบจะสุ่มค่าเล็กน้อยก่อนยิงคำสั่งจริง โดยไม่แก้ข้อมูลใน `STEPS`:
+- `delay_seconds` คือค่ารอพื้นฐาน
+- ตอน runtime จะบวก delay สุ่มเพิ่มระหว่าง `0.0-2.0` วินาทีผ่าน `get_runtime_step_delay`
+- `tap` จะถูก jitter พิกัดไม่เกิน `2` px ผ่าน `jitter_tap_coordinates`
+- comment `# index xx` ใน `STEPS` ใช้สำหรับช่วยทำ slice ของ group ควรตรวจซ้ำหลังเพิ่ม/ลบ step
 
-- `tap` จะสุ่มพิกัด `x/y` เพิ่มหรือลดไม่เกิน `2` px
-- `delay_seconds` จะถูกเพิ่มเวลาแบบสุ่ม `0-3` วินาที
-- manual tap จาก coordinate picker ยังใช้พิกัดจริง ไม่ผ่าน jitter
-
-ตัวแปร flow ใหม่:
+ฟังก์ชันสำคัญ:
 
 ```python
-STEP_GROUPS = {
-    "reset_account": {"label": "Reset Account", "steps": STEPS[0:5]},
-    ...
+resolve_group_steps(group_key)
+get_steps_for_flow(group_keys=None)
+get_step_label(step, index=None)
+jitter_tap_coordinates(x, y)
+get_runtime_step_delay(step)
+execute_step(device_id, step)
+run_once(device_id)
+```
+
+### `STEP_GROUPS`
+
+`STEP_GROUPS` มีทั้งกลุ่มที่ชี้ตรงไปยัง slice ของ `STEPS` และกลุ่ม state ที่รวมหลาย group ย่อย
+
+กลุ่มพื้นฐานปัจจุบัน:
+
+```python
+reset_account             -> STEPS[0:5]
+devplay_login             -> STEPS[5:8]
+exit_tutorial             -> STEPS[8:11]
+name_character            -> STEPS[11:15]
+skip_news                 -> STEPS[15:18]
+claim_popup_rewards       -> STEPS[18:28]
+mailbox_rewards           -> STEPS[28:33]
+enter_treasure_draw       -> STEPS[33:35]
+open_treasure_boxes       -> STEPS[35:53]
+exit_treasure             -> STEPS[51:53]
+open_treasure_boxs_6+1    -> STEPS[53:64]
+Hatch_9_time              -> STEPS[64:86]
+Hatch_15_time             -> STEPS[86:120]
+```
+
+กลุ่ม state ปัจจุบัน:
+
+```python
+State_Reset_ID
+State_Open_Free_Treasure
+State_Open_Treasure_6+1
+State_Open_Pets_15
+State_Open_Pets_9
+```
+
+ตัวอย่าง group ซ้อน:
+
+```python
+"State_Reset_ID": {
+    "label": "State_Reset_ID",
+    "groups": [
+        "reset_account",
+        "devplay_login",
+        "exit_tutorial",
+        "name_character",
+        "skip_news",
+        "claim_popup_rewards",
+        "mailbox_rewards",
+    ],
 }
+```
 
+ถ้าจะเพิ่ม group ใหม่:
+
+1. เพิ่ม step ใน `STEPS`
+2. ตรวจเลข index
+3. เพิ่ม entry ใน `STEP_GROUPS`
+4. ถ้าเป็น state รวมหลาย group ให้ใช้ `"groups"` แทน `"steps"`
+5. ถ้าต้องการให้ Run Full Flow ใช้ด้วย ให้เพิ่ม key ใน `MAIN_FLOW`
+
+### `MAIN_FLOW`
+
+`MAIN_FLOW` คือ flow หลักสำหรับ `Run Full Flow`
+
+```python
 MAIN_FLOW = [
-    "reset_account",
-    "devplay_login",
-    ...
-]
-```
-
-กลุ่มใน `STEP_GROUPS` อ้างอิง slice จาก `STEPS` เดิม จึงควรระวัง index ถ้าเพิ่ม/ลบ step ใน `STEPS`
-
-### `Gui.py`
-
-ไฟล์ GUI หลัก ใช้ `tkinter` สำหรับหน้าจอควบคุม และใช้ `cv2`/`numpy` สำหรับ screenshot live
-
-หน้าที่สำคัญ:
-
-- ให้ผู้ใช้กรอก `Device ID`
-- รองรับ device slot สูงสุด 6 ช่องสำหรับรันบอทหลาย emulator พร้อมกัน
-- มีปุ่ม `Run Score` และ `Stop` แยกในแต่ละ device slot เพื่อเริ่ม/หยุด score flow รายเครื่อง
-- แยกหน้าเป็นแท็บ `Main` และ `Debug`
-- แท็บ `Main` แสดง Device Settings แบบย่อและ `Main Log` สำหรับดู loop/score รายเครื่อง
-- แท็บ `Debug` เป็นหน้าควบคุมเดิมพร้อม Coordinate Picker, Bot Control, Step Control และ log เต็ม
-- ปุ่ม `Fill Found Devices` สำหรับเติม device จาก `adb devices` ลง slot อัตโนมัติ
-- ปุ่ม `List Devices` สำหรับรัน `adb devices`
-- ปุ่ม `Find Position` เปิดหน้าต่าง live coordinate picker
-- ปุ่ม `Capture Once` จับ screenshot ครั้งเดียว
-- ปุ่ม `Run Bot` และ `Stop Bot` สำหรับควบคุม reroll
-- ปุ่ม `Run Full Flow` สำหรับรันตาม `MAIN_FLOW`
-- ปุ่ม `Run Score Flow` สำหรับรัน flow นับคะแนนจนเจอเป้าหมายครบ 3 คะแนน
-- dropdown `Group` และปุ่ม `Run Group` สำหรับรันเฉพาะกลุ่ม step
-- dropdown `Single Step` และปุ่ม `Run Step` สำหรับรัน step เดี่ยวเพื่อ debug
-- ระหว่าง step เปิดกล่อง treasure ระบบจะตรวจภาพใน `Image_Select` หลัง delay ของคำสั่ง `Press Open Supreme boxs ...`
-- checkbox `Loop` กำหนดว่าจะวนหลายรอบหรือรันครั้งเดียว
-- แสดง log การทำงานบนหน้าจอ
-
-ไฟล์นี้ import ข้อมูลและฟังก์ชันจาก `Bot.py`:
-
-```python
-from Bot import STEPS, STEP_GROUPS, MAIN_FLOW, get_steps_for_flow, get_step_label
-```
-
-ดังนั้นถ้าต้องแก้ลำดับ reroll หลัก ให้แก้ที่ `STEPS` และตรวจ `STEP_GROUPS`/`MAIN_FLOW` ใน `Bot.py` ให้ตรงกัน แล้ว GUI จะใช้ flow ใหม่อัตโนมัติ
-
-กลไก thread:
-
-- `BotRunner` 1 ตัวต่อ 1 device ใช้ background thread แยกกัน เพื่อให้รันพร้อมกันได้สูงสุด 6 device
-- `BotRunner` รับ `steps`, `run_label`, และ `loop_enabled` ตอนเริ่มรัน ทำให้ใช้ runner เดียวกันได้ทั้ง full flow, group และ single step
-- `BotRunner` จะหยุด step ถัดไปทันทีถ้า image matching เจอ PNG ใด ๆ ใน `Image_Select` หลังเปิดกล่อง treasure
-- `ScoreFlowRunner` เป็น runner พิเศษสำหรับนับคะแนนจากภาพเป้าหมาย 3 รูป และเปลี่ยน flow ตามคะแนน
-- `_coord_thread` รัน coordinate picker ใน background thread
-- `_coord_window_running` เป็น global flag สำหรับสั่งหยุด coordinate picker
-
-ข้อควรระวัง:
-
-- Tkinter ไม่ได้ thread-safe เต็มรูปแบบ ควรอัปเดต UI ผ่าน `root.after(...)` เป็นหลัก
-- ปุ่ม `Stop Bot` ใน GUI สามารถหยุดระหว่าง delay ได้ เพราะ delay ถูกแบ่ง sleep ทีละ `0.1` วินาที
-- `Run Full Flow` ใช้ค่า checkbox `Loop` ได้ แต่ `Run Group` และ `Run Step` ตั้งใจให้รันครั้งเดียวเพื่อใช้ debug
-- Coordinate picker และ `Capture Once` ยังใช้ device ตัวแรกที่กรอกไว้ ไม่ได้เปิดพร้อมกันหลายเครื่อง
-- `Bot.py` แบบ console หยุดได้ด้วย `Ctrl+C` เท่านั้น
-
-### Image Matching ในช่วงเปิดกล่อง
-
-ไฟล์ PNG สำหรับเลือกผลลัพธ์ที่ต้องหยุดให้วางไว้ใน:
-
-```text
-Image_Select/
-```
-
-ระบบอ่านทุกไฟล์ `*.png` ในโฟลเดอร์นี้ และพยายามตัดพื้นที่ด้านในกรอบสีแดงออกมาเป็น template ก่อนนำไปเทียบกับ screenshot จริงผ่าน OpenCV `matchTemplate`
-
-ค่าที่เกี่ยวข้องอยู่ใน `Gui.py`:
-
-```python
-IMAGE_SELECT_DIR = Path(__file__).resolve().parent / "Image_Select"
-IMAGE_MATCH_THRESHOLD = 0.84
-OPEN_BOX_STEP_PREFIX = "Press Open Supreme boxs"
-```
-
-เงื่อนไขทำงาน:
-
-- หลัง step เช่น `("tap", 749, 522, 10.0, "Press Open Supreme boxs 1")` ยิง tap และรอครบ `10.0` วินาทีแล้ว
-- GUI จะ capture screenshot ของ device นั้น
-- ถ้าเจอ template ใด ๆ ใน `Image_Select` ด้วย score ตั้งแต่ `0.84` ขึ้นไป จะหยุด runner ของ device นั้นทันที
-- ถ้าไม่เจอ จะทำ step ถัดไปตามปกติ เช่น confirm แล้วเปิดกล่องรอบถัดไป
-
-### Score Flow
-
-ปุ่ม `Run Score Flow` จะนับแต้มจากภาพเป้าหมายต่อ device จนครบ 3 คะแนนแล้วหยุด
-
-ไฟล์เป้าหมายที่นับคะแนน:
-
-```text
-Image_Select/Treasure/Definitions/Victor'sFeatherLaurelWreath.png
-Image_Select/Treasure/Definitions/Jingle-jangleCoinWallet.png
-Image_Select/Pets/Definitions/TaterTraderhatched!.png
-```
-
-กติกา:
-
-- เจอ `Victor'sFeatherLaurelWreath` ได้ `+1`
-- เจอ `Jingle-jangleCoinWallet` ได้ `+1`
-- เจอ `TaterTraderhatched!` ได้ `+1`
-- ชื่อเดียวกันนับคะแนนได้ครั้งเดียว เพื่อกันการนับซ้ำจาก reward screen เดิม
-- ถ้าคะแนนครบ `3/3` จะหยุด runner ของ device นั้น
-
-ลำดับ flow:
-
-1. เริ่มด้วย `enter_treasure_draw`
-2. รัน `open_treasure_boxes`
-3. ถ้าคะแนนรวมเป็น `0` หรือ `1` จะรัน `open_treasure_boxs_6+1`
-4. ถ้าหลัง `open_treasure_boxs_6+1` คะแนนเป็น `2` จะรัน `Hatch_9_time`
-5. ถ้าหลัง `open_treasure_boxes` คะแนนเป็น `2` ขึ้นไป จะรัน `Hatch_15_time`
-6. ถ้ายังไม่ครบ `3` จะ reset account แล้วกลับมาถึง `enter_treasure_draw` ก่อนวนใหม่
-
-กลุ่มที่ใช้ใน reset loop:
-
-```python
-RESET_TO_TREASURE_FLOW = [
     "reset_account",
     "devplay_login",
     "exit_tutorial",
@@ -188,83 +131,352 @@ RESET_TO_TREASURE_FLOW = [
     "claim_popup_rewards",
     "mailbox_rewards",
     "enter_treasure_draw",
+    "open_treasure_boxes",
+    "exit_treasure",
 ]
 ```
 
-### `CoordPicker.py`
+## `Gui.py`
 
-เครื่องมือ standalone สำหรับค้นหาพิกัดบนหน้าจอ MuMu Player
+GUI ปัจจุบันใช้ `customtkinter` ไม่ใช่ `ttk` เป็นหลักแล้ว
 
-หน้าที่สำคัญ:
+หน้าที่หลัก:
 
-- ดึง screenshot ผ่าน `adb exec-out screencap -p`
-- decode ภาพด้วย OpenCV
-- เปิดหน้าต่าง live view
-- left-click เพื่อ print พิกัด `x, y`
-- right-click เพื่อส่ง tap จริงไปยัง emulator
-- กด `SPACE` เพื่อ pause/resume ภาพ
-- กด `q` เพื่อออก
+- รองรับสูงสุด `6` device slots
+- มีแท็บ `Main`, `Config` และ `Debug`
+- มี per-device Score Target เป็น `2` หรือ `3`
+- มีปุ่ม `Run Score` และ `Stop` ราย device
+- มีปุ่ม global เช่น `Run Full Flow`, `Run Score Flow`, `Run Pet Img Test`, `Stop All`
+- มี `Main Log` พร้อม filter ตาม device
+- มี Tab `Config` สำหรับปรับค่า step runtime และตั้งค่า Discord Webhook
+- มี Discord Webhook ในแท็บ `Config` สำหรับแจ้งเตือนผลลัพธ์สำคัญ
+- มี Debug log แบบเต็ม
+- มี Coordinate Picker และ Capture Once
+- มี Group/Single Step runner สำหรับ debug
 
-ไฟล์นี้เหมาะสำหรับใช้ก่อนแก้ `STEPS` เพื่อหาพิกัดปุ่มใหม่หลัง UI เกมเปลี่ยน
+ค่าคงที่สำคัญ:
 
-## Dependency และเครื่องมือที่ต้องมี
-
-โปรเจกต์นี้ไม่มีไฟล์ `requirements.txt` หรือ config dependency อื่นใน repository
-
-สิ่งที่ต้องมีในเครื่อง:
-
-- Python
-- ADB ที่เรียกได้จาก `PATH`
-- MuMu Player เปิดใช้งานและเชื่อมกับ ADB ได้
-- Python packages:
-  - `opencv-python` สำหรับ `cv2`
-  - `numpy`
-
-`tkinter`, `subprocess`, `threading`, `time`, และ `sys` เป็นส่วนที่มักมากับ Python หรือ standard library
-
-คำสั่งตรวจ device:
-
-```powershell
-adb devices
+```python
+MAX_DEVICE_SLOTS = 6
+IMAGE_SELECT_DIR = Path(__file__).resolve().parent / "Image_Select"
+DISCORD_WEBHOOK_CONFIG_PATH = Path(__file__).resolve().parent / "discord_webhook.local"
+STEP_CONFIG_PATH = Path(__file__).resolve().parent / "step_config.local"
+DISCORD_WEBHOOK_TIMEOUT = 4
+IMAGE_MATCH_THRESHOLD = 0.84
+SCORE_MATCH_THRESHOLD = 0.84
+MATCH_SCALES = (0.90, 0.95, 1.0, 1.05, 1.10)
+SCORE_CHECK_ATTEMPTS = 5
+SCORE_CHECK_RETRY_DELAY = 0.5
+PET_CHECK_ATTEMPTS = 8
+SCORE_TARGET_CHOICES = ("2", "3")
+DEFAULT_SCORE_TARGET = 3
 ```
 
-ตัวอย่าง device ที่ระบบตั้งไว้:
+### GUI Layout
+
+แท็บ `Main`:
+
+- Device Settings แบบสรุป
+- แต่ละ device slot มีช่อง device id, status, target score, Run Score, Stop
+- Main Log
+- filter Main Log เป็น `All Devices` หรือราย device
+
+แท็บ `Config`:
+
+- Step Config สำหรับเลือก step แล้วแก้ค่า runtime ผ่าน GUI
+- ปุ่ม `Select` แสดงรายการ step แบบ inline scroll list ในหน้าเดิม ไม่เปิด popup window แยก
+- รายการ step แสดงสูงประมาณ 10 แถวและเลื่อนเลือกได้
+- ช่อง `Step Text` ใช้แก้ description/note ของ step
+- ช่อง `Text Value` แสดงเฉพาะ step ประเภท `text` เช่น `13. [text] Input name`
+- สำหรับ step ประเภท `tap` แก้ค่า `X`, `Y`, `Time` ได้
+- สำหรับ step ประเภท `text` แก้ค่า `Text Value`, `Step Text`, `Time` ได้
+- สำหรับ step ประเภท `keyevent` แก้ค่า `Step Text` และ `Time` ได้
+- ปุ่ม `Save Step` บันทึกค่าลง runtime และไฟล์ `step_config.local`
+- ปุ่ม `Reload` โหลดค่าล่าสุดของ step นั้นกลับเข้า UI ใช้ยกเลิกค่าที่พิมพ์ค้างก่อนกด Save
+- Notifications สำหรับวาง Discord Webhook URL, Save และ Test
+
+แท็บ `Debug`:
+
+- Coordinate Picker
+- Bot Control
+- Step Control
+- Group และ Single Step ใช้ปุ่ม `Select` แสดงรายการแบบ inline scroll list สูงประมาณ 10 แถว ไม่เปิด popup window แยก
+- Debug Log
+
+### Step Config
+
+`Config > Step Config` ใช้ปรับค่าของ `STEPS` จาก GUI โดยไม่ต้องแก้ `Bot.py` ตรง ๆ
+
+ค่าที่ปรับได้:
 
 ```text
-127.0.0.1:16384
+tap      -> x, y, time, step text
+text     -> text value, time, step text
+keyevent -> time, step text
 ```
 
-ถ้า MuMu Player ใช้ port อื่น ให้แก้ `DEVICE_ID` ใน `Bot.py`/`CoordPicker.py` หรือกรอกผ่าน GUI ใน `Gui.py` ได้สูงสุด 6 ช่อง
+เมื่อกด `Save Step` ระบบจะ:
 
-## Flow การทำงานของบอท
+1. อัปเดต tuple ใน `STEPS`
+2. อัปเดต `STEP_GROUPS` ที่อ้าง tuple เดิมจาก slice ของ `STEPS`
+3. อัปเดตรายการเลือก step ใน `Config` และ `Debug`
+4. บันทึก override ลงไฟล์ local
 
-ลำดับหลักอยู่ใน `STEPS` ของ `Bot.py` โดยครอบคลุมประมาณนี้:
+ไฟล์ config:
 
-1. เข้าเมนู setting
-2. เข้า game info
-3. ลบ account และรอโหลด
-4. confirm การลบ
-5. login ผ่าน DevPlay
-6. ออกจากเกม/ข้าม tutorial
-7. ใส่ชื่อตัวละคร
-8. ปิด popup ข่าว/โฆษณา
-9. รับของรางวัลรายวันและของขวัญ
-10. เข้า mailbox
-11. claim reward ทั้งหมด
-12. ออกจาก mailbox
-13. จบรอบ แล้วเริ่มรอบใหม่ถ้าอยู่ใน loop mode
+```text
+step_config.local
+```
 
-ทุก step เป็นการกดตามพิกัดหน้าจอ จึงขึ้นกับ:
+รายละเอียด:
 
-- resolution ของ emulator
-- scaling ของ MuMu Player
-- state ปัจจุบันของเกม
-- เวลาโหลดของเครื่องและ network
-- UI เกมหลังอัปเดต
+- ไฟล์นี้อยู่ข้าง `Gui.py`
+- ถูก ignore ด้วย rule `*.local` ใน `.gitignore`
+- เก็บเฉพาะค่าที่แก้ผ่าน GUI เช่น `x`, `y`, `time`, `note`, `value`
+- ตอนเปิด GUI ระบบจะโหลด override จากไฟล์นี้แล้ว apply ทับ `STEPS` ใน memory
+- ถ้าต้องการกลับไปใช้ค่าใน `Bot.py` ให้ลบ entry ในไฟล์นี้หรือถอดไฟล์ `step_config.local` ออก
+- Console bot (`python Bot.py`) ไม่โหลด `step_config.local`; override นี้มีผลกับ GUI runtime เท่านั้น
 
-ถ้าบอทกดผิดตำแหน่ง ให้ใช้ `CoordPicker.py` หรือปุ่ม `Find Position` ใน GUI เพื่อหาพิกัดใหม่ แล้วแก้ค่าใน `STEPS`
+### Discord Webhook
+
+Webhook เป็น optional ถ้าไม่กรอก URL ระบบจะไม่ส่ง notification และ bot ทำงานเหมือนเดิม
+
+การตั้งค่าใน GUI:
+
+1. เปิดแท็บ `Config`
+2. วาง Discord webhook URL ใน section `Notifications`
+3. กด `Save`
+4. กด `Test` เพื่อทดสอบส่งข้อความไป Discord
+
+ไฟล์ config:
+
+```text
+discord_webhook.local
+```
+
+รายละเอียด:
+
+- ไฟล์นี้อยู่ข้าง `Gui.py`
+- ถูก ignore ด้วย rule `*.local` ใน `.gitignore`
+- ไม่ควร commit หรือส่งไฟล์นี้ให้คนอื่น เพราะ webhook URL ใช้ส่งข้อความเข้า channel ได้
+- ถ้าล้างช่อง URL แล้วกด `Save` ระบบจะลบ config local
+
+ระบบส่ง webhook ด้วย standard library:
+
+```python
+urllib.request
+```
+
+ไม่มี dependency เพิ่มใน `requirements.txt`
+
+Event ที่ส่ง notification:
+
+- `BotRunner`: เจอ select image หลังเปิดกล่อง และหยุด runner
+- `ScoreFlowRunner`: score ถึง target score แล้วจบ flow
+- `PetImageTestRunner`: เจอ pet target แล้วหยุดเพื่อเก็บ account
+
+ข้อควรระวัง:
+
+- ส่งแบบ background thread เพื่อไม่ให้ GUI หรือ bot flow ค้าง
+- มี timeout `4` วินาที
+- ถ้าส่งไม่สำเร็จจะแสดง warn ใน log แต่ไม่หยุด bot
+- ไม่ส่งทุก cycle เพื่อลด spam และลดโอกาสชน Discord rate limit
+
+## Runner ใน `Gui.py`
+
+### `BotRunner`
+
+ใช้สำหรับรัน step แบบทั่วไป:
+
+- `Run Full Flow`
+- `Run Group`
+- `Run Step`
+
+ลักษณะ:
+
+- รับ `steps`, `run_label`, `loop_enabled`
+- รันบน thread แยกต่อ device
+- delay ถูกแบ่ง sleep ทีละ `0.1` วินาที ทำให้ stop ได้ระหว่างรอ
+- ถ้าเจอ select image หลัง `Press Open Supreme boxs...` จะหยุด runner
+- ถ้าตั้งค่า Discord webhook ไว้ จะส่ง notification ตอนเจอ select image
+
+### `ScoreFlowRunner`
+
+ใช้กับ `Run Score Flow` หรือปุ่ม `Run Score` ราย device
+
+หน้าที่:
+
+- นับคะแนนจาก target image
+- เปลี่ยน state ตามคะแนน
+- หยุดเมื่อคะแนนถึง target score ของ device นั้น
+- target score เลือกได้ `2` หรือ `3`
+- ถ้า reset account แล้วเริ่มรอบใหม่ คะแนนจะ reset เป็น `0`
+- ถ้าตั้งค่า Discord webhook ไว้ จะส่ง notification ตอน score complete
+
+Target image:
+
+```python
+Victor'sFeatherLaurelWreath
+Jingle-jangleCoinWallet
+TaterTraderhatched!
+```
+
+ชื่อเดียวกันนับได้ครั้งเดียวใน account เดียว เพื่อกันการนับซ้ำจาก popup เดิม
+
+State routing:
+
+```text
+เริ่ม -> State 1: State_Open_Free_Treasure
+
+ถ้าหลัง State 1 score == 2:
+    -> State 3: State_Open_Pets_15
+    -> ถ้ายังไม่ครบ target score -> State 6: State_Reset_ID
+
+ถ้าหลัง State 1 score == 0 หรือ 1:
+    -> State 2: State_Open_Treasure_6+1
+    -> ถ้าหลัง State 2 score == 2:
+        -> State 5: State_Open_Pets_9
+    -> ถ้ายังไม่ครบ target score -> State 6: State_Reset_ID
+
+ถ้าระหว่างทาง score >= target score:
+    -> หยุด device นั้น
+```
+
+### `PetImageTestRunner`
+
+ใช้กับ `Run Pet Img Test`
+
+หน้าที่:
+
+- ทดสอบหา `TaterTraderhatched!`
+- รัน `State_Open_Pets_15`
+- ถ้าเจอภาพ pet target จะหยุดและเก็บ account ปัจจุบันไว้
+- ถ้าไม่เจอ จะรัน `State_Reset_ID` แล้ววนใหม่
+- ถ้าตั้งค่า Discord webhook ไว้ จะส่ง notification ตอนเจอ pet target
+
+## Image Matching
+
+ระบบใช้ OpenCV `matchTemplate` แต่ปรับให้เสถียรกว่า template matching ธรรมดา:
+
+- อ่าน PNG ด้วย `np.fromfile + cv2.imdecode` เพื่อรองรับ path/filename บน Windows
+- crop template จากกรอบ marker
+- รองรับ marker สีเขียว `#26E600` และกรอบแดงแบบเดิม
+- ใช้ grayscale matching
+- ทดลองหลาย scale จาก `MATCH_SCALES`
+- เก็บ score ต่อ part ของ template
+
+### โฟลเดอร์ภาพ
+
+โครงสร้างปัจจุบัน:
+
+```text
+Image_Select/
+  Pets/
+    Definitions/
+      TaterTraderhatched!.png
+    Additional/
+      ...
+  Treasure/
+    Definitions/
+      Jingle-jangleCoinWallet.png
+      Victor'sFeatherLaurelWreath.png
+    Additional/
+      ...
+```
+
+### Score Templates
+
+`load_score_templates()` โหลดเฉพาะไฟล์ที่ `stem` อยู่ใน `SCORE_TARGET_STEMS`
+
+```python
+SCORE_TARGET_STEMS = {
+    "Victor'sFeatherLaurelWreath",
+    "Jingle-jangleCoinWallet",
+    "TaterTraderhatched!",
+}
+```
+
+`Additional` ยังไม่ได้นับคะแนนโดยตรง เว้นแต่ชื่อไฟล์ตรงกับ target stems ที่กำหนด
+
+### Tater Trader Matching
+
+`TaterTraderhatched!` มี policy พิเศษ:
+
+```python
+TARGET_MATCH_THRESHOLDS = {
+    "TaterTraderhatched!": 0.82,
+}
+
+MULTI_PART_MATCH_TARGETS = {
+    "TaterTraderhatched!": {
+        "required_parts": 4,
+        "min_average_score": 0.90,
+    },
+}
+```
+
+ความหมาย:
+
+- แต่ละ part ของ template ต้องผ่าน threshold
+- ต้องผ่านอย่างน้อย `4` parts
+- ค่าเฉลี่ยต้อง >= `0.90`
+- ลด false positive จากภาพ pet อื่นที่คล้ายกัน
+
+## Coordinate Picker
+
+มี 2 จุด:
+
+1. `CoordPicker.py` เป็น standalone script
+2. `Gui.py` มีปุ่ม `Find Position`
+
+การใช้งาน:
+
+- left-click แสดงพิกัด
+- right-click ส่ง tap จริง
+- `SPACE` pause/resume
+- `q` ออก
+
+หมายเหตุ: Coordinate picker และ Capture Once ใช้ device ตัวแรกที่กรอกไว้ ไม่ได้เปิดพร้อมกันหลายเครื่อง
+
+## Dependency
+
+มี `requirements.txt` แล้ว:
+
+```text
+numpy>=1.26
+opencv-python>=4.9
+customtkinter>=5.2
+```
+
+Discord webhook ใช้ `urllib.request` จาก Python standard library จึงไม่ต้องติดตั้ง package เพิ่ม
+
+สิ่งที่ต้องมีนอก Python:
+
+- ADB ที่เรียกจาก command line ได้
+- MuMu Player เปิดใช้งาน
+- device id เช่น `127.0.0.1:16384`
+
+ไฟล์ช่วย:
+
+```text
+install_dependencies.bat
+run_gui.bat
+Setup.md
+```
 
 ## วิธีรัน
+
+ติดตั้ง dependency:
+
+```powershell
+pip install -r requirements.txt
+```
+
+หรือใช้:
+
+```powershell
+install_dependencies.bat
+```
 
 รัน GUI:
 
@@ -272,113 +484,211 @@ adb devices
 python Gui.py
 ```
 
-รัน bot แบบ console:
+หรือ:
+
+```powershell
+run_gui.bat
+```
+
+รัน console bot:
 
 ```powershell
 python Bot.py
 ```
 
-รัน coordinate picker แบบ standalone:
+รัน coordinate picker standalone:
 
 ```powershell
 python CoordPicker.py
 ```
 
-## จุดที่มักต้องแก้เมื่อต้องพัฒนาต่อ
+ตรวจ device:
 
-### แก้ลำดับการกด
+```powershell
+adb devices
+```
+
+## จุดที่มักต้องแก้
+
+### เพิ่ม step
 
 แก้ `STEPS` ใน `Bot.py`
 
-ตัวอย่างเพิ่ม step tap:
-
 ```python
-("tap", 640, 520, 3.0, "Press Some Button")
+("tap", 640, 520, 3.0, "Press Some Button"),  # index xx
 ```
 
-### แก้ชื่อที่กรอกในเกม
+หลังเพิ่มต้องตรวจ:
 
-แก้ step นี้ใน `Bot.py`:
+- index comment
+- slice ใน `STEP_GROUPS`
+- state group ที่เกี่ยวข้อง
+- `MAIN_FLOW` ถ้าต้องการให้ Run Full Flow ใช้ด้วย
+- ถ้ามี `step_config.local` อยู่และ index ที่เพิ่ม/ลบทำให้ตำแหน่ง step เปลี่ยน ควรตรวจไฟล์ override นี้ด้วย เพราะ key อ้างอิงด้วย step index แบบ 0-based
 
-```python
-("text", "MyCharacterName", 2.5, "Input name")
+### ปรับ step ผ่าน GUI
+
+ถ้าแก้แค่พิกัด, delay, text value หรือ description ของ step เดิม ให้ใช้:
+
+```text
+Config > Step Config > Select > Save Step
 ```
 
-หมายเหตุ: `adb shell input text` มีข้อจำกัดกับช่องว่างและอักขระพิเศษ หากต้องกรอกชื่อซับซ้อนอาจต้อง escape text หรือใช้วิธี paste ผ่าน clipboard/IME เพิ่มเติม
+แนวทาง:
 
-### แก้ device เริ่มต้น
+- ใช้ `Select` เลือก step จาก inline list
+- แก้ `X`, `Y`, `Time` สำหรับ step ประเภท `tap`
+- แก้ `Text Value` สำหรับ step ประเภท `text`
+- แก้ `Step Text` เพื่อเปลี่ยนชื่อ/คำอธิบายที่แสดงใน log และ selector
+- กด `Save Step` เพื่อบันทึกลง `step_config.local`
+- กด `Reload` ถ้าต้องการยกเลิกค่าที่พิมพ์ไว้แต่ยังไม่ได้ save
 
-ใน `Bot.py`:
+### เพิ่ม group
 
-```python
-DEVICE_ID = "127.0.0.1:16384"
-```
-
-ใน `CoordPicker.py`:
-
-```python
-DEVICE_ID = "127.0.0.1:16384"
-```
-
-ใน `Gui.py`:
+ถ้า group อ้าง slice:
 
 ```python
-DEFAULT_DEVICE_ID = "127.0.0.1:16384"
+"new_group": {
+    "label": "New Group",
+    "steps": STEPS[120:125],
+}
 ```
 
-### ปรับความเร็ว
+ถ้า group รวมหลาย group:
 
-แก้ delay ของแต่ละ step ใน `STEPS`
+```python
+"State_New": {
+    "label": "State_New",
+    "groups": [
+        "group_a",
+        "group_b",
+    ],
+}
+```
 
-ถ้าเครื่องหรือ network ช้า ให้เพิ่ม delay หลัง step ที่มีโหลดหนัก เช่น delete account, login, tutorial, mailbox claim
+### เพิ่ม target image
 
-## ข้อจำกัดของระบบปัจจุบัน
+ถ้าต้องการให้เป็น score target:
 
-- ไม่มี image recognition หรือ state detection ระบบกดตามพิกัดและเวลารอเท่านั้น
-- ถ้าเกมโหลดช้า, popup เปลี่ยน, หรือ UI เปลี่ยน บอทอาจหลุด flow
-- ไม่มี error handling จาก `adb` อย่างละเอียด เพราะคำสั่งส่วนใหญ่ใช้ `capture_output=True` แต่ไม่ตรวจ `returncode`
-- ไม่มี config แยก เช่น JSON/YAML สำหรับ `STEPS`
-- ไม่มีระบบบันทึกผลลัพธ์ reroll หรือเช็คว่ารอบนั้นได้ตัวละคร/ไอเท็มที่ต้องการหรือไม่
-- ไม่มี dependency file ทำให้ setup เครื่องใหม่อาจต้องเดา package เอง
+1. วาง PNG ใน `Image_Select/.../Definitions`
+2. ใส่กรอบ marker รอบส่วนที่ต้อง match
+3. เพิ่ม stem ใน `SCORE_TARGET_STEMS`
+4. ถ้าต้องการชื่อสั้นใน log ให้เพิ่มใน `SCORE_TARGET_SHORT_NAMES`
+5. ถ้าภาพ false positive ง่าย ให้เพิ่ม policy ใน `TARGET_MATCH_THRESHOLDS` หรือ `MULTI_PART_MATCH_TARGETS`
 
-## แนวทางพัฒนาต่อที่แนะนำ
+### ปรับความแม่นของ matching
 
-1. แยก `STEPS`, `DEVICE_ID`, และชื่อ character ไปเป็น config file
-2. เพิ่ม `requirements.txt`
-3. เพิ่มการตรวจ `adb` error และแสดง stderr ใน log
-4. ปรับ GUI logging ให้ thread-safe ทั้งหมดผ่าน `root.after(...)`
-5. เพิ่มระบบ screenshot matching หรือ image recognition เพื่อตรวจ state ก่อนกด
-6. เพิ่มปุ่ม pause/resume bot ใน GUI
-7. เพิ่ม export/import step list เพื่อแก้ flow โดยไม่ต้องแก้โค้ด
-8. เพิ่ม dry-run mode เพื่อ log action โดยไม่ยิงคำสั่ง adb จริง
+จุดที่แก้ได้ใน `Gui.py`:
 
-## คำแนะนำสำหรับ AI ที่จะทำงานต่อ
+```python
+SCORE_MATCH_THRESHOLD
+MATCH_SCALES
+SCORE_CHECK_ATTEMPTS
+SCORE_CHECK_RETRY_DELAY
+TARGET_MATCH_THRESHOLDS
+MULTI_PART_MATCH_TARGETS
+```
 
-ก่อนแก้โค้ดควรอ่านไฟล์ตามลำดับนี้:
+แนวทาง:
 
-1. `Bot.py` เพื่อเข้าใจ action list และ flow หลัก
-2. `Gui.py` เพื่อเข้าใจ UI, threading, และการเรียกใช้ flow
-3. `CoordPicker.py` เพื่อเข้าใจวิธีหาพิกัดและทดสอบ tap
+- ไม่เจอทั้งที่ควรเจอ: ลด threshold หรือเพิ่ม scale
+- เจอผิดภาพ: เพิ่ม threshold หรือใช้ multi-part policy
+- ภาพขึ้นช้า: เพิ่ม attempts หรือ retry delay
 
-ถ้าผู้ใช้ขอแก้พิกัดหรือเปลี่ยน flow ให้แก้ `STEPS` ใน `Bot.py` เป็นหลัก และตรวจว่า slice ใน `STEP_GROUPS` ยังแบ่งถูกกลุ่มหรือไม่
+## ข้อจำกัด
 
-ถ้าผู้ใช้ขอปรับหน้าจอหรือปุ่มควบคุม ให้แก้ `Gui.py`
+- Step ยังอิงพิกัดหน้าจอและ delay เป็นหลัก
+- Image matching ยังเป็น template matching ไม่ใช่ OCR/AI vision
+- ถ้า emulator resolution/scale เปลี่ยนมาก อาจต้องทำ template ใหม่
+- ถ้า UI เกมเปลี่ยนหรือ popup แทรก flow อาจหลุด
+- ADB command ส่วนใหญ่ยังไม่ได้ตรวจ `returncode`/`stderr` อย่างละเอียด
+- Console bot (`Bot.py`) ไม่ใช้ GUI score flow
+- Console bot (`Bot.py`) ไม่ใช้ `step_config.local`
+- Discord webhook เป็น network call ภายนอก ถ้า URL ผิดหรือ Discord ช้า จะขึ้น warn ใน log แต่ไม่หยุด bot
 
-ถ้าผู้ใช้ขอปรับเครื่องมือหาพิกัด standalone ให้แก้ `CoordPicker.py`
+## ตรวจหลังแก้
 
-หลังแก้ควรตรวจอย่างน้อย:
+ควรรัน:
 
 ```powershell
 python -m py_compile Bot.py Gui.py CoordPicker.py
 ```
 
-และถ้ามี emulator พร้อมใช้งาน ควรทดสอบ:
+ตรวจ group ที่สำคัญ:
 
 ```powershell
-adb devices
-python Gui.py
+python -c "from Bot import resolve_group_steps; keys=['State_Open_Free_Treasure','State_Open_Treasure_6+1','State_Open_Pets_15','State_Open_Pets_9','State_Reset_ID']; print([(k, len(resolve_group_steps(k))) for k in keys])"
 ```
 
-## สรุปสั้น
+ตรวจ GUI import:
 
-ระบบนี้เป็น ADB coordinate automation สำหรับ reroll CookieRun บน MuMu Player โดยมี `Bot.py` เป็นแหล่งความจริงของ flow, `Gui.py` เป็นหน้าควบคุมที่รองรับรันบอทพร้อมกันได้สูงสุด 6 device, และ `CoordPicker.py` เป็นเครื่องมือช่วยหาพิกัด การพัฒนาต่อควรระวังเรื่องพิกัดหน้าจอ, delay, device id, thread-safety ของ Tkinter และการตรวจ error จาก ADB
+```powershell
+python -c "import Gui; print('Gui import ok')"
+```
+
+ตรวจ GUI customtkinter smoke test:
+
+```powershell
+python -c "import customtkinter as ctk, Gui; ctk.set_appearance_mode('dark'); ctk.set_default_color_theme('blue'); root=ctk.CTk(); root.withdraw(); app=Gui.App(root); root.update_idletasks(); app.tab_view.set('Config'); root.update_idletasks(); app.tab_view.set('Debug'); root.update_idletasks(); app.tab_view.set('Main'); root.update_idletasks(); root.destroy(); print('ctk tab style ok')"
+```
+
+ตรวจ template:
+
+```powershell
+python -c "import Gui; print([(t['name'], t['file'], t['part'], t['size']) for t in Gui.load_score_templates()])"
+```
+
+## สรุปสำหรับ AI ที่จะทำงานต่อ
+
+อ่านตามลำดับนี้:
+
+1. `Bot.py`: ดู `STEPS`, `STEP_GROUPS`, state groups และ helper runtime
+2. `Gui.py`: ดู constants, template loading, runners, UI methods
+3. `Image_Select`: ดู target templates และ marker boxes
+4. `requirements.txt` และ `Setup.md`: ดู dependency/setup
+
+ถ้าจะแก้ flow ให้เริ่มจาก `STEP_GROUPS` และ `ScoreFlowRunner`
+
+ถ้าจะแก้ matching ให้เริ่มจาก:
+
+```python
+extract_red_box_regions
+load_score_templates
+find_template_matches
+TARGET_MATCH_THRESHOLDS
+MULTI_PART_MATCH_TARGETS
+```
+
+ถ้าจะแก้ UI ให้ดู:
+
+```python
+App._build_main_tab
+App._build_config_tab
+App._build_step_config
+App._build_debug_tab
+App._build_device_settings
+App._toggle_inline_picker
+```
+
+ถ้าจะแก้ Discord webhook ให้ดู:
+
+```python
+read_discord_webhook_url
+write_discord_webhook_url
+post_discord_webhook
+App._build_notification_settings
+App.notify_discord_result
+```
+
+ถ้าจะแก้ Step Config ให้ดู:
+
+```python
+read_step_config_overrides
+write_step_config_overrides
+App._load_step_config_overrides
+App._load_config_step_fields
+App._set_config_text_value_visible
+App._replace_step_everywhere
+App._refresh_step_selectors
+App._on_save_config_step
+```
