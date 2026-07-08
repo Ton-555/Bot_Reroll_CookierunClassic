@@ -3,10 +3,10 @@ GUI Main Interface for MuMu Player Reroll Bot
 """
 
 import json
-import subprocess
 import threading
 import time
 import tkinter as tk
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -14,6 +14,7 @@ import customtkinter as ctk
 import cv2
 import numpy as np
 
+import Bot
 from Bot import (
     MAIN_FLOW,
     STEPS,
@@ -21,6 +22,7 @@ from Bot import (
     get_step_label,
     get_steps_for_flow,
     get_runtime_step_delay,
+    run_hidden,
     jitter_tap_coordinates,
     resolve_group_steps,
     tap as bot_tap,
@@ -45,9 +47,12 @@ DANGER_COLOR = "#7f2d2d"
 DANGER_HOVER_COLOR = "#923838"
 SUCCESS_COLOR = "#3f8f5f"
 WARN_COLOR = "#b38a22"
-IMAGE_SELECT_DIR = Path(__file__).resolve().parent / "Image_Select"
-DISCORD_WEBHOOK_CONFIG_PATH = Path(__file__).resolve().parent / "discord_webhook.local"
-STEP_CONFIG_PATH = Path(__file__).resolve().parent / "step_config.local"
+APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+IMAGE_SELECT_DIR = RESOURCE_DIR / "Image_Select"
+DISCORD_WEBHOOK_CONFIG_PATH = APP_DIR / "discord_webhook.local"
+STEP_CONFIG_PATH = APP_DIR / "step_config.local"
+RUNTIME_CONFIG_PATH = APP_DIR / "runtime_config.local"
 DISCORD_WEBHOOK_TIMEOUT = 4
 IMAGE_MATCH_THRESHOLD = 0.84
 SCORE_MATCH_THRESHOLD = 0.84
@@ -80,6 +85,7 @@ MULTI_PART_MATCH_TARGETS = {
 PET_CHECK_ATTEMPTS = 8
 SCORE_TARGET_CHOICES = ("2", "3")
 DEFAULT_SCORE_TARGET = 3
+SCORE_NOTIFY_MILESTONES = {2, 3}
 SCORE_CHECK_STEP_PREFIXES = (
     "Press Open Supreme boxs",
     "Press Open Treasure 6+1",
@@ -95,9 +101,13 @@ STATE_RESET_ID = "State_Reset_ID"
 _coord_window_running = False
 _coord_thread = None
 
+DEFAULT_RUNTIME_TAP_POSITION_JITTER = Bot.TAP_POSITION_JITTER
+DEFAULT_RUNTIME_DELAY_EXTRA_SECONDS_MIN = Bot.DELAY_EXTRA_SECONDS_MIN
+DEFAULT_RUNTIME_DELAY_EXTRA_SECONDS_MAX = Bot.DELAY_EXTRA_SECONDS_MAX
+
 
 def screencap(device_id):
-    result = subprocess.run(
+    result = run_hidden(
         ["adb", "-s", device_id, "exec-out", "screencap", "-p"],
         capture_output=True
     )
@@ -109,7 +119,7 @@ def screencap(device_id):
 
 
 def send_tap(device_id, x, y):
-    subprocess.run(["adb", "-s", device_id, "shell", "input", "tap", str(x), str(y)])
+    run_hidden(["adb", "-s", device_id, "shell", "input", "tap", str(x), str(y)])
 
 
 def score_target_short_name(target_name):
@@ -377,6 +387,32 @@ def write_step_config_overrides(step_config):
         STEP_CONFIG_PATH.unlink()
 
 
+def read_runtime_config_overrides():
+    try:
+        raw_config = json.loads(RUNTIME_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw_config, dict):
+        return {}
+    return raw_config
+
+
+def write_runtime_config_overrides(runtime_config):
+    if runtime_config:
+        RUNTIME_CONFIG_PATH.write_text(
+            json.dumps(runtime_config, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    elif RUNTIME_CONFIG_PATH.exists():
+        RUNTIME_CONFIG_PATH.unlink()
+
+
+def apply_runtime_config_values(position_jitter, delay_min, delay_max):
+    Bot.TAP_POSITION_JITTER = int(position_jitter)
+    Bot.DELAY_EXTRA_SECONDS_MIN = float(delay_min)
+    Bot.DELAY_EXTRA_SECONDS_MAX = float(delay_max)
+
+
 def post_discord_webhook(url, content):
     payload = json.dumps({"content": content}, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
@@ -430,6 +466,7 @@ class BotRunner:
                 "info",
             )
             self.log(f"=== {self.run_label} Cycle #{cycle} ===\n", "success")
+            self.log(f"Loop summary: {self.run_label} Loop #{cycle} started.\n", "info")
 
             for i, step in enumerate(self.steps, 1):
                 if not self.running:
@@ -477,6 +514,7 @@ class BotRunner:
                 break
 
             self.log(f"--- Cycle #{cycle} complete ---\n", "success")
+            self.log(f"Loop summary: {self.run_label} Loop #{cycle} complete.\n", "success")
             self.app.safe_main_log(
                 f"[D{self.slot_index + 1} {self.device_id}] {self.run_label} Loop #{cycle} complete\n",
                 "success",
@@ -507,6 +545,7 @@ class ScoreFlowRunner:
         self.score = 0
         self.matched_targets = set()
         self.matched_target_names = []
+        self.notified_score_milestones = set()
         self.cycle_count = 0
         self.stop_reason = None
 
@@ -538,6 +577,24 @@ class ScoreFlowRunner:
             f"{self._format_found_targets()}\n"
         )
 
+    def _notify_score_milestone(self, latest_target):
+        if self.score not in SCORE_NOTIFY_MILESTONES:
+            return
+        if self.score in self.notified_score_milestones:
+            return
+
+        self.notified_score_milestones.add(self.score)
+        self.app.notify_discord_result(
+            f"Score {self.score} reached",
+            (
+                f"D{self.slot_index + 1} {self.device_id}\n"
+                f"Score: {self.score}/{self.target_score}\n"
+                f"Loop: {self.cycle_count}\n"
+                f"Latest target: {score_target_short_name(latest_target)}"
+                f"{self._format_found_targets()}"
+            ),
+        )
+
     def _run(self):
         self.log(f"Score State Flow started. Start at State 1. Target score: {self.target_score}\n", "success")
         self.app.root.after(
@@ -552,6 +609,11 @@ class ScoreFlowRunner:
                     f"=== Score Flow Round #{self.cycle_count} | score {self.score}/{self.target_score} ===\n",
                     "success",
                 )
+                self.log(
+                    f"Loop summary: Score Loop #{self.cycle_count} | "
+                    f"Score {self.score}/{self.target_score}{self._format_found_targets()}\n",
+                    "info",
+                )
                 self.app.safe_main_log(
                     self._format_score_loop_main_log(),
                     "info",
@@ -563,8 +625,8 @@ class ScoreFlowRunner:
 
                 if self.score == 2:
                     self.log("State 1 ended with score 2. Routing to State 3.\n", "info")
-                    self._execute_state("3", STATE_OPEN_PETS_15)
-                    if self._should_stop_now():
+                    self._execute_state("3", STATE_OPEN_PETS_15, allow_target_score=True)
+                    if self._should_stop_now() or self.score >= self.target_score:
                         break
                     self.log("State 3 ended with score 2. Routing to State 6.\n", "info")
                     self._execute_reset_state()
@@ -577,8 +639,8 @@ class ScoreFlowRunner:
 
                 if self.score == 2:
                     self.log("State 2 ended with score 2. Routing to State 5.\n", "info")
-                    self._execute_state("5", STATE_OPEN_PETS_9)
-                    if self._should_stop_now():
+                    self._execute_state("5", STATE_OPEN_PETS_9, allow_target_score=True)
+                    if self._should_stop_now() or self.score >= self.target_score:
                         break
                     self.log("State 5 ended with score 2. Routing to State 6.\n", "info")
                     self._execute_reset_state()
@@ -593,21 +655,27 @@ class ScoreFlowRunner:
                     f"Target reached: score is {self.score}/{self.target_score}. Stopping this device.\n",
                     "success",
                 )
+                self.log(
+                    f"Loop summary: Score Loop #{self.cycle_count} complete | "
+                    f"Score {self.score}/{self.target_score}{self._format_found_targets()}\n",
+                    "success",
+                )
                 self.app.safe_main_log(
                     f"[D{self.slot_index + 1} {self.device_id}] Score complete | "
                     f"Loop #{self.cycle_count}  | Score {self.score}/{self.target_score}"
                     f"{self._format_found_targets()}\n",
                     "success",
                 )
-                self.app.notify_discord_result(
-                    "Score flow complete",
-                    (
-                        f"D{self.slot_index + 1} {self.device_id}\n"
-                        f"Score: {self.score}/{self.target_score}\n"
-                        f"Loop: {self.cycle_count}"
-                        f"{self._format_found_targets()}"
-                    ),
-                )
+                if self.score not in self.notified_score_milestones:
+                    self.app.notify_discord_result(
+                        "Score flow complete",
+                        (
+                            f"D{self.slot_index + 1} {self.device_id}\n"
+                            f"Score: {self.score}/{self.target_score}\n"
+                            f"Loop: {self.cycle_count}"
+                            f"{self._format_found_targets()}"
+                        ),
+                    )
             elif self.stop_reason == "manual_stop":
                 self.log("Score flow stopped by user.\n", "warn")
             else:
@@ -624,7 +692,7 @@ class ScoreFlowRunner:
             self._reset_score_for_next_account()
             self.log("State 6 complete. Returning to State 1.\n", "warn")
 
-    def _execute_state(self, state_number, group_key):
+    def _execute_state(self, state_number, group_key, allow_target_score=False):
         group_data = STEP_GROUPS[group_key]
         self.log(f"-- State {state_number}: {group_data['label']} --\n", "info")
         self.app.root.after(
@@ -634,27 +702,30 @@ class ScoreFlowRunner:
                 f"State {s} | Score {self.score}/{self.target_score}",
             ),
         )
-        self._execute_group(group_key)
+        self._execute_group(group_key, allow_target_score=allow_target_score)
 
     def _reset_score_for_next_account(self):
         self.score = 0
         self.matched_targets.clear()
         self.matched_target_names.clear()
+        self.notified_score_milestones.clear()
         self.app.root.after(
             0,
             lambda: self.app._set_device_status(self.slot_index, f"Score 0/{self.target_score}"),
         )
         self.log(f"Score reset to 0/{self.target_score} for next account.\n", "info")
 
-    def _execute_group(self, group_key):
+    def _execute_group(self, group_key, allow_target_score=False):
         group_data = STEP_GROUPS[group_key]
         steps = resolve_group_steps(group_key)
         self.log(f"-- Group: {group_data['label']} ({len(steps)} steps) --\n", "info")
-        self._execute_steps(steps)
+        self._execute_steps(steps, allow_target_score=allow_target_score)
 
-    def _execute_steps(self, steps):
+    def _execute_steps(self, steps, allow_target_score=False):
         for i, step in enumerate(steps, 1):
-            if not self.running or self.score >= self.target_score:
+            if not self.running:
+                break
+            if self.score >= self.target_score and not allow_target_score:
                 break
 
             action = step[0]
@@ -717,13 +788,14 @@ class ScoreFlowRunner:
                 self._format_score_loop_main_log(),
                 "success",
             )
+            self._notify_score_milestone(target)
 
-            if self.score >= self.target_score:
+            if self.score >= self.target_score and self.score != 2:
                 self.running = False
                 break
 
     def _should_stop_now(self):
-        return not self.running or self.score >= self.target_score
+        return not self.running or (self.score >= self.target_score and self.score != 2)
 
 
 class PetImageTestRunner:
@@ -760,6 +832,7 @@ class PetImageTestRunner:
                 self.cycle_count += 1
                 self.found_match = None
                 self.log(f"=== Pet Image Test Loop #{self.cycle_count} ===\n", "success")
+                self.log(f"Loop summary: Pet Image Test Loop #{self.cycle_count} started.\n", "info")
                 self.app.safe_main_log(
                     f"[D{self.slot_index + 1} {self.device_id}] Pet Image Test Loop #{self.cycle_count}\n",
                     "info",
@@ -775,6 +848,11 @@ class PetImageTestRunner:
                     self.log(
                         f"Pet image matched: {match['name']} score={match['score']:.3f}. "
                         "Stopping pet image test and keeping current account.\n",
+                        "success",
+                    )
+                    self.log(
+                        f"Loop summary: Pet Image Test Loop #{self.cycle_count} matched "
+                        f"{match['name']} score={match['score']:.3f}.\n",
                         "success",
                     )
                     self.app.notify_discord_result(
@@ -802,6 +880,10 @@ class PetImageTestRunner:
                 self.log(
                     f"Pet image test loop #{self.cycle_count} complete. "
                     "State 6 reset finished. Starting next loop.\n",
+                    "success",
+                )
+                self.log(
+                    f"Loop summary: Pet Image Test Loop #{self.cycle_count} complete | reset finished.\n",
                     "success",
                 )
 
@@ -913,6 +995,9 @@ class App:
         self.main_log_filter_combo = None
         self.tab_view = None
         self.log_widget = None
+        self.debug_log_entries = []
+        self.debug_log_filter_var = tk.StringVar(value=MAIN_LOG_FILTER_ALL)
+        self.debug_log_filter_combo = None
         discord_webhook_url = read_discord_webhook_url()
         self.discord_webhook_url = discord_webhook_url
         self.discord_webhook_var = tk.StringVar(value=discord_webhook_url)
@@ -940,11 +1025,16 @@ class App:
         self.config_step_combo = None
         self.config_step_picker = None
         self.config_step_picker_parent = None
+        self.runtime_position_jitter_var = tk.StringVar()
+        self.runtime_delay_min_var = tk.StringVar()
+        self.runtime_delay_max_var = tk.StringVar()
+        self.runtime_config_status_var = tk.StringVar(value="Runtime config ready")
         self.debug_group_picker = None
         self.debug_group_picker_parent = None
         self.debug_step_picker = None
         self.debug_step_picker_parent = None
         self.step_config_overrides = read_step_config_overrides()
+        self.runtime_config_overrides = read_runtime_config_overrides()
 
         for slot in range(MAX_DEVICE_SLOTS):
             default_value = DEFAULT_DEVICE_ID if slot == 0 else ""
@@ -957,9 +1047,12 @@ class App:
             self.device_score_target_vars.append(score_target_var)
 
         loaded_step_overrides = self._load_step_config_overrides()
+        loaded_runtime_overrides = self._load_runtime_config_overrides()
         self._build_ui()
         if loaded_step_overrides:
             self._log(f"Loaded {loaded_step_overrides} step config override(s).\n", "info")
+        if loaded_runtime_overrides:
+            self._log(f"Loaded {loaded_runtime_overrides} runtime random config override(s).\n", "info")
 
     def _build_ui(self):
         tab_view = ctk.CTkTabview(
@@ -1238,6 +1331,33 @@ class App:
         log_section, log_frame = self._section(main_frame, "Log")
         log_section.pack(fill=tk.BOTH, expand=True)
 
+        debug_log_filter_frame = ctk.CTkFrame(log_frame, fg_color="transparent")
+        debug_log_filter_frame.pack(fill=tk.X, pady=(0, 5))
+        ctk.CTkLabel(
+            debug_log_filter_frame,
+            text="Device:",
+            text_color=TEXT_MUTED_COLOR,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        self.debug_log_filter_combo = ctk.CTkComboBox(
+            debug_log_filter_frame,
+            variable=self.debug_log_filter_var,
+            values=[MAIN_LOG_FILTER_ALL],
+            state="readonly",
+            width=280,
+            height=30,
+            corner_radius=6,
+            fg_color=LOG_BG,
+            border_color=BORDER_COLOR,
+            button_color=SURFACE_ALT_BG,
+            button_hover_color=BORDER_COLOR,
+            dropdown_fg_color=SURFACE_BG,
+            dropdown_hover_color=SURFACE_ALT_BG,
+            text_color=TEXT_COLOR,
+            dropdown_text_color=TEXT_COLOR,
+            command=lambda _choice: self._on_debug_log_filter_changed(),
+        )
+        self.debug_log_filter_combo.pack(side=tk.LEFT)
+
         self.log_widget = ctk.CTkTextbox(
             log_frame,
             wrap=tk.WORD,
@@ -1253,12 +1373,14 @@ class App:
         )
         self.log_widget.pack(fill=tk.BOTH, expand=True)
         self._configure_log_tags(self.log_widget)
+        self._update_debug_log_filter_options()
 
     def _build_config_tab(self, parent):
         main_frame = ctk.CTkFrame(parent, fg_color="transparent")
         main_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
         self._build_step_config(main_frame)
+        self._build_runtime_config(main_frame)
         self._build_notification_settings(main_frame)
 
     def _build_step_config(self, parent):
@@ -1386,6 +1508,65 @@ class App:
         self.config_step_status_label.grid(row=5, column=3, columnspan=3, sticky=tk.W, padx=(12, 0), pady=(8, 0))
 
         self._load_config_step_fields()
+
+    def _build_runtime_config(self, parent):
+        runtime_section, runtime_frame = self._section(parent, "Runtime Random")
+        runtime_section.pack(fill=tk.X, pady=(0, 8))
+
+        ctk.CTkLabel(runtime_frame, text="Tap jitter +/- px:", text_color=TEXT_MUTED_COLOR).grid(
+            row=0, column=0, sticky=tk.W, padx=(0, 8), pady=4
+        )
+        ctk.CTkEntry(
+            runtime_frame,
+            textvariable=self.runtime_position_jitter_var,
+            fg_color=LOG_BG,
+            border_color=BORDER_COLOR,
+            text_color=TEXT_COLOR,
+            width=90,
+            height=30,
+            corner_radius=6,
+        ).grid(row=0, column=1, sticky=tk.W, padx=(0, 16), pady=4)
+
+        ctk.CTkLabel(runtime_frame, text="Delay random min:", text_color=TEXT_MUTED_COLOR).grid(
+            row=0, column=2, sticky=tk.W, padx=(0, 8), pady=4
+        )
+        ctk.CTkEntry(
+            runtime_frame,
+            textvariable=self.runtime_delay_min_var,
+            fg_color=LOG_BG,
+            border_color=BORDER_COLOR,
+            text_color=TEXT_COLOR,
+            width=90,
+            height=30,
+            corner_radius=6,
+        ).grid(row=0, column=3, sticky=tk.W, padx=(0, 16), pady=4)
+
+        ctk.CTkLabel(runtime_frame, text="Delay random max:", text_color=TEXT_MUTED_COLOR).grid(
+            row=0, column=4, sticky=tk.W, padx=(0, 8), pady=4
+        )
+        ctk.CTkEntry(
+            runtime_frame,
+            textvariable=self.runtime_delay_max_var,
+            fg_color=LOG_BG,
+            border_color=BORDER_COLOR,
+            text_color=TEXT_COLOR,
+            width=90,
+            height=30,
+            corner_radius=6,
+        ).grid(row=0, column=5, sticky=tk.W, padx=(0, 16), pady=4)
+
+        self._button(runtime_frame, "Save", self._on_save_runtime_config, width=78).grid(
+            row=0, column=6, sticky=tk.W, padx=(0, 6), pady=4
+        )
+        self._button(runtime_frame, "Reload", self._on_reload_runtime_config, width=82).grid(
+            row=0, column=7, sticky=tk.W, padx=(0, 12), pady=4
+        )
+        ctk.CTkLabel(
+            runtime_frame,
+            textvariable=self.runtime_config_status_var,
+            text_color=TEXT_MUTED_COLOR,
+            anchor="w",
+        ).grid(row=0, column=8, sticky=tk.W, pady=4)
 
     def _build_device_settings(self, parent):
         settings_section, settings_frame = self._section(parent, "Device Settings")
@@ -1599,6 +1780,106 @@ class App:
             self._replace_step_everywhere(step_index, new_step)
             loaded += 1
         return loaded
+
+    def _set_runtime_config_fields(self):
+        self.runtime_position_jitter_var.set(str(Bot.TAP_POSITION_JITTER))
+        self.runtime_delay_min_var.set(f"{Bot.DELAY_EXTRA_SECONDS_MIN:g}")
+        self.runtime_delay_max_var.set(f"{Bot.DELAY_EXTRA_SECONDS_MAX:g}")
+
+    def _load_runtime_config_overrides(self):
+        position_jitter = DEFAULT_RUNTIME_TAP_POSITION_JITTER
+        delay_min = DEFAULT_RUNTIME_DELAY_EXTRA_SECONDS_MIN
+        delay_max = DEFAULT_RUNTIME_DELAY_EXTRA_SECONDS_MAX
+        loaded = 0
+
+        try:
+            if "tap_position_jitter" in self.runtime_config_overrides:
+                position_jitter = int(self.runtime_config_overrides["tap_position_jitter"])
+                loaded += 1
+            if "delay_extra_seconds_min" in self.runtime_config_overrides:
+                delay_min = float(self.runtime_config_overrides["delay_extra_seconds_min"])
+                loaded += 1
+            if "delay_extra_seconds_max" in self.runtime_config_overrides:
+                delay_max = float(self.runtime_config_overrides["delay_extra_seconds_max"])
+                loaded += 1
+        except (TypeError, ValueError):
+            position_jitter = DEFAULT_RUNTIME_TAP_POSITION_JITTER
+            delay_min = DEFAULT_RUNTIME_DELAY_EXTRA_SECONDS_MIN
+            delay_max = DEFAULT_RUNTIME_DELAY_EXTRA_SECONDS_MAX
+            loaded = 0
+
+        if position_jitter < 0:
+            position_jitter = DEFAULT_RUNTIME_TAP_POSITION_JITTER
+            loaded = 0
+        if delay_min < 0 or delay_max < 0 or delay_max < delay_min:
+            delay_min = DEFAULT_RUNTIME_DELAY_EXTRA_SECONDS_MIN
+            delay_max = DEFAULT_RUNTIME_DELAY_EXTRA_SECONDS_MAX
+            loaded = 0
+
+        apply_runtime_config_values(position_jitter, delay_min, delay_max)
+        self._set_runtime_config_fields()
+        return loaded
+
+    def _parse_runtime_config_fields(self):
+        try:
+            position_jitter = int(self.runtime_position_jitter_var.get().strip())
+        except ValueError:
+            raise ValueError("Tap jitter must be an integer.")
+
+        try:
+            delay_min = float(self.runtime_delay_min_var.get().strip())
+            delay_max = float(self.runtime_delay_max_var.get().strip())
+        except ValueError:
+            raise ValueError("Delay random min/max must be numbers.")
+
+        if position_jitter < 0:
+            raise ValueError("Tap jitter must be 0 or more.")
+        if delay_min < 0 or delay_max < 0:
+            raise ValueError("Delay random min/max must be 0 or more.")
+        if delay_max < delay_min:
+            raise ValueError("Delay random max must be greater than or equal to min.")
+
+        return position_jitter, delay_min, delay_max
+
+    def _on_save_runtime_config(self):
+        try:
+            position_jitter, delay_min, delay_max = self._parse_runtime_config_fields()
+        except ValueError as exc:
+            self.runtime_config_status_var.set("Invalid value")
+            self._log(f"Runtime random config was not saved: {exc}\n", "error")
+            return
+
+        apply_runtime_config_values(position_jitter, delay_min, delay_max)
+        runtime_config = {
+            "tap_position_jitter": position_jitter,
+            "delay_extra_seconds_min": delay_min,
+            "delay_extra_seconds_max": delay_max,
+        }
+        try:
+            write_runtime_config_overrides(runtime_config)
+        except OSError as exc:
+            self.runtime_config_status_var.set("Save failed")
+            self._log(f"Runtime random config save failed: {exc}\n", "error")
+            return
+
+        self.runtime_config_overrides = runtime_config
+        self._set_runtime_config_fields()
+        self.runtime_config_status_var.set("Saved")
+        self._log(
+            f"Runtime random config saved: tap jitter +/-{position_jitter}px, "
+            f"delay +{delay_min:g}-{delay_max:g}s.\n",
+            "success",
+        )
+
+    def _on_reload_runtime_config(self):
+        self.runtime_config_overrides = read_runtime_config_overrides()
+        loaded = self._load_runtime_config_overrides()
+        self.runtime_config_status_var.set("Reloaded" if loaded else "Defaults")
+        self._log(
+            f"Runtime random config reloaded: tap jitter +/-{Bot.TAP_POSITION_JITTER}px, "
+            f"delay +{Bot.DELAY_EXTRA_SECONDS_MIN:g}-{Bot.DELAY_EXTRA_SECONDS_MAX:g}s.\n",
+            "info",
+        )
 
     def _selected_config_step_index(self):
         return self.config_step_label_to_index.get(self.config_step_var.get())
@@ -1839,7 +2120,15 @@ class App:
     def _log(self, text, tag=None):
         if self.log_widget is None:
             return
-        self._insert_log_text(self.log_widget, text, tag)
+        device_key, device_label = self._parse_main_log_device(text)
+        self.debug_log_entries.append({
+            "text": text,
+            "tag": tag,
+            "device_key": device_key,
+            "device_label": device_label,
+        })
+        self._update_debug_log_filter_options(render_on_change=False)
+        self._render_debug_log()
 
     def safe_log(self, text, tag=None):
         self.root.after(0, lambda: self._log(text, tag))
@@ -1879,6 +2168,64 @@ class App:
             if device_id:
                 return f"{device_key} {device_id}"
         return device_key
+
+    def _selected_debug_log_device_key(self):
+        selected = self.debug_log_filter_var.get()
+        if selected == MAIN_LOG_FILTER_ALL:
+            return None
+        return selected.split(maxsplit=1)[0]
+
+    def _debug_log_entry_visible(self, entry):
+        selected_key = self._selected_debug_log_device_key()
+        return selected_key is None or entry["device_key"] == selected_key
+
+    def _update_debug_log_filter_options(self, render_on_change=True):
+        if self.debug_log_filter_combo is None:
+            return
+
+        previous = self.debug_log_filter_var.get()
+        selected_key = self._selected_debug_log_device_key()
+        values = [MAIN_LOG_FILTER_ALL]
+        seen_keys = set()
+
+        for slot_index, device_var in enumerate(self.device_id_vars):
+            device_id = device_var.get().strip()
+            if not device_id:
+                continue
+            device_key = f"D{slot_index + 1}"
+            values.append(f"{device_key} {device_id}")
+            seen_keys.add(device_key)
+
+        for entry in self.debug_log_entries:
+            device_key = entry["device_key"]
+            if not device_key or device_key in seen_keys:
+                continue
+            values.append(entry["device_label"] or self._main_log_filter_label(device_key))
+            seen_keys.add(device_key)
+
+        self.debug_log_filter_combo.configure(values=values)
+        if selected_key is None:
+            self.debug_log_filter_var.set(MAIN_LOG_FILTER_ALL)
+        else:
+            selected_value = next(
+                (value for value in values if value.split(maxsplit=1)[0] == selected_key),
+                MAIN_LOG_FILTER_ALL,
+            )
+            self.debug_log_filter_var.set(selected_value)
+
+        if render_on_change and self.debug_log_filter_var.get() != previous:
+            self._render_debug_log()
+
+    def _on_debug_log_filter_changed(self, _event=None):
+        self._render_debug_log()
+
+    def _render_debug_log(self):
+        if self.log_widget is None:
+            return
+        self._delete_log_text(self.log_widget)
+        for entry in self.debug_log_entries:
+            if self._debug_log_entry_visible(entry):
+                self._insert_log_text(self.log_widget, entry["text"], entry["tag"])
 
     def _update_main_log_filter_options(self, render_on_change=True):
         if self.main_log_filter_combo is None:
@@ -2173,6 +2520,7 @@ class App:
             for button in self.device_stop_buttons[slot_index]:
                 button.configure(state=stop_state)
         self._update_main_log_filter_options()
+        self._update_debug_log_filter_options()
 
     def _update_global_controls(self):
         any_running = any(runner and runner.running for runner in self.runners)
@@ -2183,7 +2531,7 @@ class App:
         self._update_device_controls()
 
     def _read_adb_devices(self):
-        result = subprocess.run(["adb", "devices"], capture_output=True, text=True)
+        result = run_hidden(["adb", "devices"], capture_output=True, text=True)
         output = result.stdout.strip()
         lines = output.splitlines()
         devices = [l.split()[0] for l in lines[1:] if l.strip() and "\tdevice" in l]
@@ -2199,11 +2547,11 @@ class App:
         self._log("=== Reset ADB & Find Devices ===\n", "info")
 
         self._log("[1/3] adb kill-server...\n", "warn")
-        subprocess.run(["adb", "kill-server"], capture_output=True)
+        run_hidden(["adb", "kill-server"], capture_output=True)
         self._log("      done.\n\n", "success")
 
         self._log("[2/3] adb start-server...\n", "info")
-        result = subprocess.run(["adb", "start-server"], capture_output=True, text=True)
+        result = run_hidden(["adb", "start-server"], capture_output=True, text=True)
         self._log(f"      {result.stdout.strip()}\n\n", "success")
 
         self._log("[3/3] adb devices\n", "info")

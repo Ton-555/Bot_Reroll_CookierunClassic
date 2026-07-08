@@ -18,6 +18,12 @@ TAP_POSITION_JITTER = 2
 DELAY_EXTRA_SECONDS_MIN = 0.0
 DELAY_EXTRA_SECONDS_MAX = 2.0
 
+
+def run_hidden(args, **kwargs):
+    if sys.platform == "win32":
+        kwargs.setdefault("creationflags", subprocess.CREATE_NO_WINDOW)
+    return subprocess.run(args, **kwargs)
+
 STEPS = [
     ("tap", 1127, 33, 3.0,    "Press Setting"),  # index 00
     ("tap", 1010, 150, 3.0,   "Press Game Info"),  # index 01
@@ -305,21 +311,21 @@ def get_runtime_step_delay(step):
 
 
 def tap(device_id, x, y):
-    subprocess.run(
+    run_hidden(
         ["adb", "-s", device_id, "shell", "input", "tap", str(x), str(y)],
         capture_output=True
     )
 
 
 def input_text(device_id, text):
-    subprocess.run(
+    run_hidden(
         ["adb", "-s", device_id, "shell", "input", "text", text],
         capture_output=True
     )
 
 
 def keyevent(device_id, keycode):
-    subprocess.run(
+    run_hidden(
         ["adb", "-s", device_id, "shell", "input", "keyevent", keycode],
         capture_output=True
     )

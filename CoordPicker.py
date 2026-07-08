@@ -16,6 +16,7 @@ Usage:
 """
 
 import subprocess
+import sys
 import time
 import cv2
 import numpy as np
@@ -29,9 +30,15 @@ paused = False
 latest_frame = None
 
 
+def run_hidden(args, **kwargs):
+    if sys.platform == "win32":
+        kwargs.setdefault("creationflags", subprocess.CREATE_NO_WINDOW)
+    return subprocess.run(args, **kwargs)
+
+
 def screencap(device_id):
     """Capture current device screenshot and convert to OpenCV-compatible image"""
-    result = subprocess.run(
+    result = run_hidden(
         ["adb", "-s", device_id, "exec-out", "screencap", "-p"],
         capture_output=True
     )
@@ -44,7 +51,7 @@ def screencap(device_id):
 
 def send_tap(device_id, x, y):
     """Send actual tap command to device at the specified coordinates"""
-    subprocess.run(["adb", "-s", device_id, "shell", "input", "tap", str(x), str(y)])
+    run_hidden(["adb", "-s", device_id, "shell", "input", "tap", str(x), str(y)])
 
 
 def on_mouse_click(event, x, y, flags, param):
