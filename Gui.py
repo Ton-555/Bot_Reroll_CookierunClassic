@@ -53,6 +53,10 @@ IMAGE_SELECT_DIR = RESOURCE_DIR / "Image_Select"
 DISCORD_WEBHOOK_CONFIG_PATH = APP_DIR / "discord_webhook.local"
 STEP_CONFIG_PATH = APP_DIR / "step_config.local"
 RUNTIME_CONFIG_PATH = APP_DIR / "runtime_config.local"
+LOG_DIR = APP_DIR / "logs"
+DEBUG_LOG_PATH = LOG_DIR / "log.txt"
+MAIN_LOG_PATH = LOG_DIR / "main_log.txt"
+LOG_ENTRY_LIMIT = 2000
 DISCORD_WEBHOOK_TIMEOUT = 4
 IMAGE_MATCH_THRESHOLD = 0.84
 SCORE_MATCH_THRESHOLD = 0.84
@@ -405,6 +409,17 @@ def write_runtime_config_overrides(runtime_config):
         )
     elif RUNTIME_CONFIG_PATH.exists():
         RUNTIME_CONFIG_PATH.unlink()
+
+
+def clear_log_file(path):
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+
+
+def append_log_file(path, text):
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as log_file:
+        log_file.write(text)
 
 
 def apply_runtime_config_values(position_jitter, delay_min, delay_max):
@@ -993,6 +1008,7 @@ class App:
         self.main_log_entries = []
         self.main_log_filter_var = tk.StringVar(value=MAIN_LOG_FILTER_ALL)
         self.main_log_filter_combo = None
+        self._log_file_error_reported = False
         self.tab_view = None
         self.log_widget = None
         self.debug_log_entries = []
@@ -1048,6 +1064,7 @@ class App:
 
         loaded_step_overrides = self._load_step_config_overrides()
         loaded_runtime_overrides = self._load_runtime_config_overrides()
+        self._clear_log_files()
         self._build_ui()
         if loaded_step_overrides:
             self._log(f"Loaded {loaded_step_overrides} step config override(s).\n", "info")
@@ -2117,9 +2134,49 @@ class App:
     def _delete_log_text(self, widget):
         self._text_widget(widget).delete("1.0", tk.END)
 
+    def _write_log_file(self, path, text):
+        try:
+            append_log_file(path, text)
+        except OSError as exc:
+            if not self._log_file_error_reported:
+                self._log_file_error_reported = True
+                print(f"Log file write failed: {exc}", file=sys.stderr)
+
+    def _clear_log_files(self):
+        try:
+            clear_log_file(DEBUG_LOG_PATH)
+            clear_log_file(MAIN_LOG_PATH)
+            self._log_file_error_reported = False
+        except OSError as exc:
+            if not self._log_file_error_reported:
+                self._log_file_error_reported = True
+                print(f"Log file clear failed: {exc}", file=sys.stderr)
+
+    def _trim_log_entries(self, entries):
+        if len(entries) > LOG_ENTRY_LIMIT:
+            del entries[:-LOG_ENTRY_LIMIT]
+
+    def _clear_log_views(self):
+        self.debug_log_entries.clear()
+        self.main_log_entries.clear()
+        self.debug_log_filter_var.set(MAIN_LOG_FILTER_ALL)
+        self.main_log_filter_var.set(MAIN_LOG_FILTER_ALL)
+        if self.log_widget is not None:
+            self._delete_log_text(self.log_widget)
+        if self.main_log_widget is not None:
+            self._delete_log_text(self.main_log_widget)
+        self._update_debug_log_filter_options(render_on_change=False)
+        self._update_main_log_filter_options(render_on_change=False)
+
+    def _reset_logs(self, clear_files=True):
+        self._clear_log_views()
+        if clear_files:
+            self._clear_log_files()
+
     def _log(self, text, tag=None):
         if self.log_widget is None:
             return
+        self._write_log_file(DEBUG_LOG_PATH, text)
         device_key, device_label = self._parse_main_log_device(text)
         self.debug_log_entries.append({
             "text": text,
@@ -2127,6 +2184,7 @@ class App:
             "device_key": device_key,
             "device_label": device_label,
         })
+        self._trim_log_entries(self.debug_log_entries)
         self._update_debug_log_filter_options(render_on_change=False)
         self._render_debug_log()
 
@@ -2278,6 +2336,7 @@ class App:
     def _main_log(self, text, tag=None):
         if self.main_log_widget is None:
             return
+        self._write_log_file(MAIN_LOG_PATH, text)
         device_key, device_label = self._parse_main_log_device(text)
         self.main_log_entries.append({
             "text": text,
@@ -2285,6 +2344,7 @@ class App:
             "device_key": device_key,
             "device_label": device_label,
         })
+        self._trim_log_entries(self.main_log_entries)
         self._update_main_log_filter_options(render_on_change=False)
         self._render_main_log()
 
@@ -2329,6 +2389,7 @@ class App:
             return
 
         self.discord_webhook_status_var.set("Testing...")
+        self._log("Discord webhook test sending...\n", "info")
         self._send_discord_webhook_async(url, "MuMu Reroll Bot webhook test.", log_success=True)
 
     def notify_discord_result(self, title, detail):
@@ -2349,14 +2410,22 @@ class App:
         def worker():
             try:
                 status = post_discord_webhook(url, content)
-            except (OSError, urllib.error.URLError, urllib.error.HTTPError) as exc:
-                self.safe_log(f"Discord webhook failed: {exc}\n", "warn")
+            except urllib.error.HTTPError as exc:
+                self.safe_log(f"Discord webhook failed: HTTP {exc.code} {exc.reason}\n", "warn")
+                self.root.after(0, lambda: self.discord_webhook_status_var.set("Send failed"))
+                return
+            except (OSError, urllib.error.URLError) as exc:
+                self.safe_log(f"Discord webhook failed: {type(exc).__name__}: {exc}\n", "warn")
+                self.root.after(0, lambda: self.discord_webhook_status_var.set("Send failed"))
+                return
+            except Exception as exc:
+                self.safe_log(f"Discord webhook failed unexpectedly: {type(exc).__name__}: {exc}\n", "error")
                 self.root.after(0, lambda: self.discord_webhook_status_var.set("Send failed"))
                 return
 
             if 200 <= status < 300:
                 if log_success:
-                    self.safe_log("Discord webhook test sent.\n", "success")
+                    self.safe_log(f"Discord webhook test sent. HTTP {status}\n", "success")
                 self.root.after(0, lambda: self.discord_webhook_status_var.set("Last send OK"))
             else:
                 self.safe_log(f"Discord webhook returned HTTP {status}.\n", "warn")
@@ -2695,6 +2764,7 @@ class App:
             self._log("Bot is already running. Stop it before starting again.\n", "warn")
             return
 
+        self._reset_logs(clear_files=True)
         self._load_select_templates()
         self._log(f"=== Starting {run_label} on {len(device_ids)} device(s) ===\n", "success")
         self._log(f"Steps to run: {len(steps)}\n", "info")
@@ -2742,6 +2812,7 @@ class App:
             self._log("No idle device slots available for Score Flow.\n", "warn")
             return
 
+        self._reset_logs(clear_files=True)
         self._log(f"=== Starting Score Flow on {len(start_slots)} device(s) ===\n", "success")
         self._log("Score targets: Victor'sFeatherLaurelWreath, Jingle-jangleCoinWallet, TaterTraderhatched!\n", "info")
         target_summary = ", ".join(
@@ -2778,6 +2849,7 @@ class App:
                 return False
 
             target_score = self._get_score_target_for_slot(slot_index)
+            self._reset_logs(clear_files=True)
             self._log(f"=== Starting Score Flow on D{slot_index + 1}: {device_id} ===\n", "success")
             self._log(f"Target score: {target_score}\n", "info")
             self._log("-" * 50 + "\n", "info")
@@ -2820,6 +2892,7 @@ class App:
             self._log("No idle device slots available for Pet Image Test.\n", "warn")
             return
 
+        self._reset_logs(clear_files=True)
         self._log(f"=== Starting Pet Image Test on {len(start_slots)} device(s) ===\n", "success")
         self._log(f"Image target: {PET_TEST_TARGET_STEM}\n", "info")
         self._log("Flow: State_Open_Pets_15 -> if matched stop, otherwise State_Reset_ID\n", "info")
@@ -2932,6 +3005,7 @@ class App:
         for runner in self.runners:
             if runner and runner.running:
                 runner.stop()
+        self._reset_logs(clear_files=True)
         cv2.destroyAllWindows()
         self.root.destroy()
 
